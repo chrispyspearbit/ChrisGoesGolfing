@@ -78,27 +78,28 @@ grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:" run.log
 
 When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated).
 
-The TSV has a header row and 6 columns:
+The TSV has a header row and 7 columns:
 
 ```
-commit	val_bpb	val_bpb_quant	artifact_bytes	status	description
+commit	iterations	val_bpb	val_bpb_quant	artifact_bytes	status	description
 ```
 
 1. git commit hash (short, 7 chars)
-2. val_bpb achieved (pre-quant, e.g. 1.234567) — use 0.000000 for crashes
-3. val_bpb_quant achieved (post-quant roundtrip) — use 0.000000 for crashes
-4. artifact_bytes (e.g. 15800000) — use 0 for crashes
-5. status: `keep`, `discard`, or `crash`
-6. short text description of what this experiment tried
+2. iterations run (e.g. 200, 500, 953)
+3. val_bpb achieved (pre-quant, e.g. 1.234567) — use 0.000000 for crashes
+4. val_bpb_quant achieved (post-quant roundtrip) — use 0.000000 for crashes
+5. artifact_bytes (e.g. 15800000) — use 0 for crashes
+6. status: `keep`, `discard`, or `crash`
+7. short text description of what this experiment tried
 
 Example:
 
 ```
-commit	val_bpb	val_bpb_quant	artifact_bytes	status	description
-a1b2c3d	1.234567	1.245678	15800000	keep	baseline
-b2c3d4e	1.220000	1.231000	15900000	keep	increase matrix_lr to 0.06
-c3d4e5f	1.250000	1.261000	15800000	discard	switch to GELU activation
-d4e5f6g	0.000000	0.000000	0	crash	double model width (too slow)
+commit	iterations	val_bpb	val_bpb_quant	artifact_bytes	status	description
+a1b2c3d	953	1.234567	1.245678	15800000	keep	baseline
+b2c3d4e	953	1.220000	1.231000	15900000	keep	increase matrix_lr to 0.06
+c3d4e5f	953	1.250000	1.261000	15800000	discard	switch to GELU activation
+d4e5f6g	0	0.000000	0.000000	0	crash	double model width (too slow)
 ```
 
 ## The experiment loop
@@ -113,11 +114,27 @@ LOOP FOREVER:
 4. Run the experiment: `python train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up on that idea.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
+7. Record the results in `results.tsv`
 8. If val_bpb_quant improved (lower) AND artifact_check is PASS, you "advance" the branch, keeping the git commit
 9. If val_bpb_quant is equal or worse, or artifact is too large, you git reset back to where you started
+10. **After every experiment** (keep or discard), update and push to GitHub (see "Pushing to GitHub" below)
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck, you can rewind but do this sparingly.
+
+## Pushing to GitHub
+
+After EVERY experiment (whether kept, discarded, or crashed), you must update the remote so progress is visible on GitHub:
+
+1. **Update `results.tsv`** — append the new row (this file is tracked in git).
+2. **Regenerate the progress graph**: `python plot_progress.py` — this reads `results.tsv` and writes `progress.png`.
+3. **Update `README.md`** — update the Results table and Changelog section:
+   - The **Results table** is a markdown table with columns: #, Commit, val_bpb_quant, Artifact, Status, Description. Add a row for the new experiment. Show artifact size in MB (e.g. "15.3 MB").
+   - The **Changelog** section lists only kept experiments in reverse chronological order, with the best marked. Format: `- **#N** \`commit\` — description → **val_bpb_quant**`
+   - Update the **"Current best"** line below the table.
+4. **Commit the updates**: `git add results.tsv progress.png README.md && git commit -m "Update results: <short description>"`
+5. **Push to GitHub**: `git push origin HEAD`
+
+This ensures anyone watching the repo on GitHub can see a live, growing record of all experiments with a visual progress graph.
 
 **Timeout**: Each experiment should take ~5 minutes total (+ a few minutes for startup, warmup, and eval overhead). If a run exceeds 15 minutes, kill it and treat it as a failure.
 
