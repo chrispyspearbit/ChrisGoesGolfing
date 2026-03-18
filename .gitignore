@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Agent prompt files
+CLAUDE.md
+AGENTS.md
+
+# Results (untracked by design)
+results.tsv
+run.log
+
+# Logs and artifacts
+logs/
+*.npz
+*.ptz
+
+# Data (large, downloaded separately)
+data/

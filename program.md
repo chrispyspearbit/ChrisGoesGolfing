@@ -1,0 +1,137 @@
+# ChrisGoesGolfing — Parameter Golf Autoresearch
+
+This is an autonomous research loop for the OpenAI Parameter Golf challenge.
+Train the best language model that fits in a 16MB artifact, measured by bits-per-byte (BPB) on FineWeb.
+
+## Setup
+
+To set up a new experiment, work with the user to:
+
+1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar18`). The branch `autoresearch/<tag>` must not already exist.
+2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current main.
+3. **Read the in-scope files**: The repo is small. Read these files for full context:
+   - `README.md` — repository context.
+   - `prepare.py` — fixed constants, data loading, tokenizer, evaluation, quantization. Do not modify.
+   - `train.py` — the file you modify. Model architecture, optimizer, hyperparameters, training loop.
+4. **Verify data exists**: Check that `./data/datasets/fineweb10B_sp1024/` contains data shards and `./data/tokenizers/` contains the tokenizer. If not, tell the human to run `python prepare.py`.
+5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
+6. **Confirm and go**: Confirm setup looks good.
+
+Once you get confirmation, kick off the experimentation.
+
+## Experimentation
+
+Each experiment runs locally on Apple Silicon (MLX). The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `python train.py`.
+
+For faster iteration during exploration, you can reduce the time budget:
+- Quick smoke test: `MAX_WALLCLOCK_SECONDS=60 ITERATIONS=500 TRAIN_BATCH_TOKENS=8192 python train.py`
+- Medium run: `MAX_WALLCLOCK_SECONDS=180 python train.py`
+- Full experiment: `python train.py` (5 minutes, default)
+
+**What you CAN do:**
+- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, number of layers, attention heads, MLP width, activation functions, skip connections, etc.
+
+**What you CANNOT do:**
+- Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants.
+- Install new packages or add dependencies.
+- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
+
+**The goal is twofold:**
+1. **Lowest val_bpb** — the primary metric. Lower is better.
+2. **Artifact must fit in 16MB** — the int8+zlib compressed model + code must be ≤ 16,000,000 bytes.
+
+The artifact size is checked automatically. If `artifact_check` shows FAIL, your model is too large. You'll need to reduce parameters, adjust quantization-friendliness, or find a more compact architecture.
+
+**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Removing something and getting equal or better results is a great outcome.
+
+**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
+
+## Output format
+
+Once the script finishes it prints a summary like this:
+
+```
+---
+val_bpb:          1.234567
+val_bpb_quant:    1.245678
+artifact_bytes:   15800000
+artifact_check:   PASS (15800000/16000000)
+model_bytes:      15750000
+code_bytes:       50000
+training_seconds: 300.1
+total_tokens_M:   499.6
+num_steps:        953
+num_params:       5000000
+num_layers:       9
+model_dim:        512
+```
+
+Key metrics to extract:
+
+```
+grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:" run.log
+```
+
+**val_bpb** is the pre-quantization score. **val_bpb_quant** is the post-quantization roundtrip score (this is the official Parameter Golf metric). **artifact_bytes** must be ≤ 16,000,000.
+
+## Logging results
+
+When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated).
+
+The TSV has a header row and 6 columns:
+
+```
+commit	val_bpb	val_bpb_quant	artifact_bytes	status	description
+```
+
+1. git commit hash (short, 7 chars)
+2. val_bpb achieved (pre-quant, e.g. 1.234567) — use 0.000000 for crashes
+3. val_bpb_quant achieved (post-quant roundtrip) — use 0.000000 for crashes
+4. artifact_bytes (e.g. 15800000) — use 0 for crashes
+5. status: `keep`, `discard`, or `crash`
+6. short text description of what this experiment tried
+
+Example:
+
+```
+commit	val_bpb	val_bpb_quant	artifact_bytes	status	description
+a1b2c3d	1.234567	1.245678	15800000	keep	baseline
+b2c3d4e	1.220000	1.231000	15900000	keep	increase matrix_lr to 0.06
+c3d4e5f	1.250000	1.261000	15800000	discard	switch to GELU activation
+d4e5f6g	0.000000	0.000000	0	crash	double model width (too slow)
+```
+
+## The experiment loop
+
+The experiment runs on a dedicated branch (e.g. `autoresearch/mar18`).
+
+LOOP FOREVER:
+
+1. Look at the git state: the current branch/commit we're on
+2. Tune `train.py` with an experimental idea by directly hacking the code.
+3. git commit
+4. Run the experiment: `python train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+5. Read out the results: `grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:" run.log`
+6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up on that idea.
+7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
+8. If val_bpb_quant improved (lower) AND artifact_check is PASS, you "advance" the branch, keeping the git commit
+9. If val_bpb_quant is equal or worse, or artifact is too large, you git reset back to where you started
+
+The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck, you can rewind but do this sparingly.
+
+**Timeout**: Each experiment should take ~5 minutes total (+ a few minutes for startup, warmup, and eval overhead). If a run exceeds 15 minutes, kill it and treat it as a failure.
+
+**Crashes**: If a run crashes (OOM, or a bug), use your judgment: If it's something dumb and easy to fix (e.g. a typo), fix and re-run. If the idea itself is broken, just log "crash" and move on.
+
+**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?". The human might be asleep. You are autonomous. If you run out of ideas, think harder — re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
+
+## Ideas to explore
+
+Here are some directions worth investigating (not exhaustive):
+
+- **Architecture**: layer count vs width tradeoff, GQA head ratios, MLP expansion factor, different activation functions (GELU, SwiGLU), skip connection strategies
+- **Optimizer**: learning rates for each parameter group, momentum schedules, warmdown fraction, weight decay
+- **Training**: batch size, sequence length, gradient accumulation steps
+- **Quantization-aware**: choices that compress better under int8+zlib (smoother weight distributions, fewer outliers)
+- **Model size**: finding the sweet spot where more parameters improve BPB but still fit in 16MB after compression
+- **Tokenizer interaction**: the 1024 vocab is fixed but architecture choices interact with it
