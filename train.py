@@ -67,9 +67,9 @@ class Hyperparameters:
     # Model architecture
     vocab_size: int = int(os.environ.get("VOCAB_SIZE", 1024))
     num_layers: int = int(os.environ.get("NUM_LAYERS", 9))
-    model_dim: int = int(os.environ.get("MODEL_DIM", 640))
-    num_heads: int = int(os.environ.get("NUM_HEADS", 10))
-    num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 5))
+    model_dim: int = int(os.environ.get("MODEL_DIM", 704))
+    num_heads: int = int(os.environ.get("NUM_HEADS", 11))
+    num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 1))
     mlp_mult: int = int(os.environ.get("MLP_MULT", 2))
     logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
     rope_base: float = float(os.environ.get("ROPE_BASE", 10000.0))
