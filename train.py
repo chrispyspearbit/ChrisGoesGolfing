@@ -82,7 +82,7 @@ class Hyperparameters:
     beta2: float = float(os.environ.get("BETA2", 0.95))
     adam_eps: float = float(os.environ.get("ADAM_EPS", 1e-8))
     tied_embed_lr: float = float(os.environ.get("TIED_EMBED_LR", 0.05))
-    matrix_lr: float = float(os.environ.get("MATRIX_LR", 0.06))
+    matrix_lr: float = float(os.environ.get("MATRIX_LR", 0.08))
     scalar_lr: float = float(os.environ.get("SCALAR_LR", 0.04))
     muon_momentum: float = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_backend_steps: int = int(os.environ.get("MUON_BACKEND_STEPS", 5))
