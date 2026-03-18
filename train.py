@@ -66,7 +66,7 @@ class Hyperparameters:
 
     # Model architecture
     vocab_size: int = int(os.environ.get("VOCAB_SIZE", 1024))
-    num_layers: int = int(os.environ.get("NUM_LAYERS", 9))
+    num_layers: int = int(os.environ.get("NUM_LAYERS", 8))
     model_dim: int = int(os.environ.get("MODEL_DIM", 704))
     num_heads: int = int(os.environ.get("NUM_HEADS", 11))
     num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 1))
@@ -82,7 +82,7 @@ class Hyperparameters:
     beta2: float = float(os.environ.get("BETA2", 0.95))
     adam_eps: float = float(os.environ.get("ADAM_EPS", 1e-8))
     tied_embed_lr: float = float(os.environ.get("TIED_EMBED_LR", 0.05))
-    matrix_lr: float = float(os.environ.get("MATRIX_LR", 0.04))
+    matrix_lr: float = float(os.environ.get("MATRIX_LR", 0.06))
     scalar_lr: float = float(os.environ.get("SCALAR_LR", 0.04))
     muon_momentum: float = float(os.environ.get("MUON_MOMENTUM", 0.95))
     muon_backend_steps: int = int(os.environ.get("MUON_BACKEND_STEPS", 5))
