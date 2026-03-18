@@ -132,7 +132,7 @@ After EVERY experiment (whether kept, discarded, or crashed), you must update th
    - The **Changelog** section lists only kept experiments in reverse chronological order, with the best marked. Format: `- **#N** \`commit\` — description → **val_bpb_quant**`
    - Update the **"Current best"** line below the table.
 4. **Commit the updates**: `git add results.tsv progress.png README.md && git commit -m "Update results: <short description>"`
-5. **Push to GitHub**: `git push origin HEAD`
+5. **Push to GitHub**: `git push --force origin HEAD`
 
 This ensures anyone watching the repo on GitHub can see a live, growing record of all experiments with a visual progress graph.
 
