@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import sentencepiece as spm
+from tqdm import tqdm
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -66,9 +67,9 @@ class Hyperparameters:
     # Model architecture
     vocab_size: int = int(os.environ.get("VOCAB_SIZE", 1024))
     num_layers: int = int(os.environ.get("NUM_LAYERS", 9))
-    model_dim: int = int(os.environ.get("MODEL_DIM", 512))
-    num_heads: int = int(os.environ.get("NUM_HEADS", 8))
-    num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 4))
+    model_dim: int = int(os.environ.get("MODEL_DIM", 640))
+    num_heads: int = int(os.environ.get("NUM_HEADS", 10))
+    num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 5))
     mlp_mult: int = int(os.environ.get("MLP_MULT", 2))
     logit_softcap: float = float(os.environ.get("LOGIT_SOFTCAP", 30.0))
     rope_base: float = float(os.environ.get("ROPE_BASE", 10000.0))
@@ -468,7 +469,14 @@ def main():
     )
     opt = SplitOptimizers(model, args)
 
-    compiled_loss = mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
+    compiled_loss_raw = mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
+    _eval_pbar = None
+    def compiled_loss(x, y):
+        loss = compiled_loss_raw(x, y)
+        mx.eval(loss)
+        if _eval_pbar is not None:
+            _eval_pbar.update(1)
+        return loss
     compiled_loss_and_grad = mx.compile(
         nn.value_and_grad(model, lambda x, y: model.loss(x, y)),
         inputs=model.state, outputs=model.state,
@@ -520,10 +528,15 @@ def main():
         last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
         if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
             val_batch_tokens = args.val_batch_size // args.grad_accum_steps
+            val_batch_seqs = val_batch_tokens // args.train_seq_len
+            total_val_batches = math.ceil((val_tokens.size - 1) // args.train_seq_len / max(val_batch_seqs, 1))
+            _eval_pbar = tqdm(total=total_val_batches, desc="eval", leave=False)
             val_loss, val_bpb = evaluate_bpb(
                 compiled_loss, val_tokens, args.train_seq_len, val_batch_tokens,
                 base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
             )
+            _eval_pbar.close()
+            _eval_pbar = None
             train_time_ms += 1000.0 * (time.perf_counter() - t0)
             if step % 25 == 0 or last_step:
                 log(f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
@@ -577,10 +590,15 @@ def main():
     quant_flat = dequantize_state_dict_int8(pickle.loads(zlib.decompress(quant_blob_disk)))
     model.update(tree_unflatten(list(quant_flat.items())))
     val_batch_tokens = args.val_batch_size // args.grad_accum_steps
+    val_batch_seqs = val_batch_tokens // args.train_seq_len
+    total_val_batches = math.ceil((val_tokens.size - 1) // args.train_seq_len / max(val_batch_seqs, 1))
+    _eval_pbar = tqdm(total=total_val_batches, desc="eval (quantized)", leave=False)
     q_val_loss, q_val_bpb = evaluate_bpb(
         compiled_loss, val_tokens, args.train_seq_len, val_batch_tokens,
         base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
     )
+    _eval_pbar.close()
+    _eval_pbar = None
 
     fits = "PASS" if artifact_bytes <= ARTIFACT_SIZE_LIMIT else "FAIL"
 
