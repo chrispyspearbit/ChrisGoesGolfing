@@ -34,7 +34,6 @@ from prepare import (
     load_validation_tokens,
     build_sentencepiece_luts,
     validate_dataset_tokenizer_pair,
-    evaluate_bpb,
     quantize_state_dict_int8,
     dequantize_state_dict_int8,
     compress_artifact,
@@ -89,6 +88,10 @@ class Hyperparameters:
     muon_momentum_warmup_start: float = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
     muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+
+    # Strided eval: 95% CI early-exit
+    eval_ci_threshold: float = float(os.environ.get("EVAL_CI_THRESHOLD", 0.005))
+    eval_min_batches: int = int(os.environ.get("EVAL_MIN_BATCHES", 30))
 
     out_dir: str = os.environ.get("OUT_DIR", "logs")
 
@@ -407,6 +410,97 @@ def loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad):
     return loss_value, tree_unflatten(list(grad_accum.items()))
 
 
+def evaluate_bpb_strided(loss_fn, val_tokens, seq_len, val_batch_tokens,
+                         base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+                         ci_threshold=0.005, min_batches=30, desc="eval"):
+    """
+    Strided evaluation with 95% CI early-exit.
+    Shuffles sequence order (random seed each call) for decorrelated sampling,
+    then stops as soon as the 95% CI half-width on BPB drops below ci_threshold.
+    Returns (val_loss, val_bpb, ci_half_width, n_batches_used, total_batches).
+    """
+    val_batch_seqs = val_batch_tokens // seq_len
+    total_seqs = (val_tokens.size - 1) // seq_len
+    total_batches = math.ceil(total_seqs / val_batch_seqs)
+
+    # Shuffle with a fresh random seed each call
+    rng = np.random.RandomState()
+    seq_indices = np.arange(total_seqs)
+    rng.shuffle(seq_indices)
+
+    # Precompute token offsets for vectorized gather
+    offsets = np.arange(seq_len)
+
+    # Running accumulators
+    total_loss_sum = 0.0
+    total_tokens = 0.0
+    total_bytes = 0.0
+    batch_bpbs = []
+    ci_half = float("inf")
+
+    pbar = tqdm(total=total_batches, desc=desc, leave=False)
+
+    for batch_idx in range(total_batches):
+        batch_start = batch_idx * val_batch_seqs
+        batch_end = min(batch_start + val_batch_seqs, total_seqs)
+        batch_seq_ids = seq_indices[batch_start:batch_end]
+
+        # Vectorized gather of non-contiguous sequences
+        x_starts = batch_seq_ids[:, None] * seq_len + offsets[None, :]
+        x_np = val_tokens[x_starts]
+        y_np = val_tokens[x_starts + 1]
+
+        x = mx.array(x_np, dtype=mx.int32)
+        y = mx.array(y_np, dtype=mx.int32)
+
+        chunk_token_count = float(y.size)
+        batch_loss = float(loss_fn(x, y).item())
+
+        # Byte counting
+        prev_ids = x_np.reshape(-1)
+        tgt_ids = y_np.reshape(-1)
+        bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
+        bytes_np += (
+            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+        ).astype(np.int16, copy=False)
+        batch_bytes = float(bytes_np.astype(np.float64).sum())
+
+        # Accumulate
+        total_loss_sum += batch_loss * chunk_token_count
+        total_tokens += chunk_token_count
+        total_bytes += batch_bytes
+
+        # Per-batch BPB for CI
+        batch_bpb = (batch_loss / math.log(2.0)) * (chunk_token_count / batch_bytes)
+        batch_bpbs.append(batch_bpb)
+
+        # Compute running BPB and CI
+        n = len(batch_bpbs)
+        running_bpb = (total_loss_sum / total_tokens / math.log(2.0)) * (total_tokens / total_bytes)
+        if n >= 2:
+            arr = np.array(batch_bpbs)
+            ci_half = 1.96 * arr.std(ddof=1) / math.sqrt(n)
+            pbar.set_postfix_str(f"bpb={running_bpb:.4f} ci95=±{ci_half:.4f}")
+        else:
+            pbar.set_postfix_str(f"bpb={running_bpb:.4f}")
+
+        pbar.update(1)
+
+        # Check 95% CI after minimum batches
+        if n >= min_batches and ci_half < ci_threshold:
+            pbar.close()
+            val_loss = total_loss_sum / total_tokens
+            return val_loss, running_bpb, ci_half, n, total_batches
+
+    # Exhausted all batches
+    pbar.close()
+    val_loss = total_loss_sum / total_tokens
+    bits_per_token = val_loss / math.log(2.0)
+    val_bpb = bits_per_token * (total_tokens / total_bytes)
+    ci_half = 1.96 * np.array(batch_bpbs).std(ddof=1) / math.sqrt(len(batch_bpbs))
+    return val_loss, val_bpb, ci_half, len(batch_bpbs), total_batches
+
+
 def clip_grad_tree(grads_tree, max_norm):
     if max_norm <= 0:
         return grads_tree
@@ -528,18 +622,16 @@ def main():
         last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
         if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
             val_batch_tokens = args.val_batch_size
-            val_batch_seqs = val_batch_tokens // args.train_seq_len
-            total_val_batches = math.ceil((val_tokens.size - 1) // args.train_seq_len / max(val_batch_seqs, 1))
-            _eval_pbar = tqdm(total=total_val_batches, desc="eval", leave=False)
-            val_loss, val_bpb = evaluate_bpb(
+            val_loss, val_bpb, ci_half, n_used, n_total = evaluate_bpb_strided(
                 compiled_loss, val_tokens, args.train_seq_len, val_batch_tokens,
                 base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+                ci_threshold=args.eval_ci_threshold, min_batches=args.eval_min_batches,
+                desc="eval",
             )
-            _eval_pbar.close()
-            _eval_pbar = None
             train_time_ms += 1000.0 * (time.perf_counter() - t0)
             if step % 25 == 0 or last_step:
                 log(f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
+                    f"bpb_ci95:±{ci_half:.4f} eval_batches:{n_used}/{n_total} "
                     f"train_time:{train_time_ms:.0f}ms step_avg:{train_time_ms / max(step, 1):.2f}ms")
             t0 = time.perf_counter()
         if last_step:
@@ -590,22 +682,23 @@ def main():
     quant_flat = dequantize_state_dict_int8(pickle.loads(zlib.decompress(quant_blob_disk)))
     model.update(tree_unflatten(list(quant_flat.items())))
     val_batch_tokens = args.val_batch_size
-    val_batch_seqs = val_batch_tokens // args.train_seq_len
-    total_val_batches = math.ceil((val_tokens.size - 1) // args.train_seq_len / max(val_batch_seqs, 1))
-    _eval_pbar = tqdm(total=total_val_batches, desc="eval (quantized)", leave=False)
-    q_val_loss, q_val_bpb = evaluate_bpb(
+    q_val_loss, q_val_bpb, q_ci_half, q_n_used, q_n_total = evaluate_bpb_strided(
         compiled_loss, val_tokens, args.train_seq_len, val_batch_tokens,
         base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+        ci_threshold=args.eval_ci_threshold, min_batches=args.eval_min_batches,
+        desc="eval (quantized)",
     )
-    _eval_pbar.close()
-    _eval_pbar = None
 
     fits = "PASS" if artifact_bytes <= ARTIFACT_SIZE_LIMIT else "FAIL"
+
+    log(f"eval (quantized): bpb={q_val_bpb:.4f} ci95=±{q_ci_half:.4f} batches={q_n_used}/{q_n_total}")
 
     # Print summary in grep-friendly format
     print("---")
     print(f"val_bpb:          {val_bpb:.6f}")
+    print(f"val_bpb_ci95:     ±{ci_half:.6f}")
     print(f"val_bpb_quant:    {q_val_bpb:.6f}")
+    print(f"val_bpb_quant_ci: ±{q_ci_half:.6f}")
     print(f"artifact_bytes:   {artifact_bytes}")
     print(f"artifact_check:   {fits} ({artifact_bytes}/{ARTIFACT_SIZE_LIMIT})")
     print(f"model_bytes:      {model_bytes}")
