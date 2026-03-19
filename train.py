@@ -54,7 +54,7 @@ class Hyperparameters:
     # Training loop
     iterations: int = int(os.environ.get("ITERATIONS", 20_000))
     val_loss_every: int = int(os.environ.get("VAL_LOSS_EVERY", 0))
-    val_batch_size: int = int(os.environ.get("VAL_BATCH_SIZE", 8_192))
+    val_batch_size: int = int(os.environ.get("VAL_BATCH_SIZE", 65_536))
     train_log_every: int = int(os.environ.get("TRAIN_LOG_EVERY", 200))
     train_batch_tokens: int = int(os.environ.get("TRAIN_BATCH_TOKENS", 8_192))
     grad_accum_steps: int = int(os.environ.get("GRAD_ACCUM_STEPS", 8))
@@ -506,7 +506,7 @@ def main():
                 log(f"warmup_step:{warmup_step + 1}/{args.warmup_steps}")
 
         # Prime eval graph
-        val_batch_tokens = args.val_batch_size // args.grad_accum_steps
+        val_batch_tokens = args.val_batch_size
         warm_val_seqs = min(val_batch_tokens // args.train_seq_len, (val_tokens.size - 1) // args.train_seq_len)
         warm_chunk = val_tokens[: warm_val_seqs * args.train_seq_len + 1]
         x_val = mx.array(warm_chunk[:-1].reshape(-1, args.train_seq_len), dtype=mx.int32)
@@ -527,7 +527,7 @@ def main():
     while True:
         last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
         if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
-            val_batch_tokens = args.val_batch_size // args.grad_accum_steps
+            val_batch_tokens = args.val_batch_size
             val_batch_seqs = val_batch_tokens // args.train_seq_len
             total_val_batches = math.ceil((val_tokens.size - 1) // args.train_seq_len / max(val_batch_seqs, 1))
             _eval_pbar = tqdm(total=total_val_batches, desc="eval", leave=False)
@@ -589,7 +589,7 @@ def main():
         quant_blob_disk = f.read()
     quant_flat = dequantize_state_dict_int8(pickle.loads(zlib.decompress(quant_blob_disk)))
     model.update(tree_unflatten(list(quant_flat.items())))
-    val_batch_tokens = args.val_batch_size // args.grad_accum_steps
+    val_batch_tokens = args.val_batch_size
     val_batch_seqs = val_batch_tokens // args.train_seq_len
     total_val_batches = math.ceil((val_tokens.size - 1) // args.train_seq_len / max(val_batch_seqs, 1))
     _eval_pbar = tqdm(total=total_val_batches, desc="eval (quantized)", leave=False)
