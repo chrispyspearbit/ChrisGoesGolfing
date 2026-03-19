@@ -66,7 +66,7 @@ class Hyperparameters:
     # Model architecture
     vocab_size: int = int(os.environ.get("VOCAB_SIZE", 1024))
     num_layers: int = int(os.environ.get("NUM_LAYERS", 8))
-    model_dim: int = int(os.environ.get("MODEL_DIM", 660))
+    model_dim: int = int(os.environ.get("MODEL_DIM", 640))
     num_heads: int = int(os.environ.get("NUM_HEADS", 10))
     num_kv_heads: int = int(os.environ.get("NUM_KV_HEADS", 1))
     mlp_mult: int = int(os.environ.get("MLP_MULT", 2))

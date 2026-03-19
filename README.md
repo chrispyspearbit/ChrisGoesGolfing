@@ -20,6 +20,7 @@ An AI agent autonomously iterates on a small GPT model, trying to minimize bits-
 | 8 | bbbe9b0 | 650 | 2.005917 | 16.6 MB | discard | warmdown_iters 1200→400 (artifact FAIL) |
 | 9 | 4305cc7 | 555 | 1.999741 | 15.5 MB | discard | 9 layers dim=640 MQA (slower, fewer steps) |
 | 10 | 3ac1e8d | 603 | 1.974206 | 14.5 MB | keep | SwiGLU activation replacing ReLU-squared |
+| 11 | 69f7bc1 | 508 | 2.002231 | 14.4 MB | discard | dim=640→660 (slower per step, fewer steps) |
 
 **Current best: 1.974206** (dim=640, 10 heads, MQA, SwiGLU, lr=0.06, full run)
 
