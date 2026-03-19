@@ -16,12 +16,14 @@ An AI agent autonomously iterates on a small GPT model, trying to minimize bits-
 | 4 | 57f53b3 | 200 | 2.279354 | 16.5 MB | discard | matrix_lr=0.06 (artifact FAIL) @200 |
 | 5 | 2daa918 | 200 | 2.288981 | 15.3 MB | keep | 8 layers, dim=704, lr=0.06 @200 |
 | 6 | 2c4cdf5 | 565 | 1.990023 | 17.3 MB | discard | full run dim=704 8L lr=0.08 (artifact FAIL) |
+| 7 | d9d6b95 | 649 | 1.982319 | 14.5 MB | keep | full run dim=640 10h MQA lr=0.06 |
 
-**Current best: 2.288981** (8 layers, dim=704, lr=0.06 @200)
+**Current best: 1.982319** (dim=640, 10 heads, MQA, lr=0.06, full run)
 
 ## Changelog
 
-- **#5** `2daa918` — 8 layers, dim=704, lr=0.06 @200 → **2.288981** (best)
+- **#7** `d9d6b95` — full run dim=640 10h MQA lr=0.06 → **1.982319** (best)
+- **#5** `2daa918` — 8 layers, dim=704, lr=0.06 @200 → **2.288981**
 - **#3** `63ee03b` — dim=704, 11 heads, 1 kv_head (MQA) @200 → **2.316331**
 - **#2** `973c47e` — dim=640, 10 heads, 5 kv_heads @200 → **2.317869**
 - **#1** `9326e13` — baseline @200 → **2.326520**
