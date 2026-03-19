@@ -7,15 +7,13 @@ Train the best language model that fits in a 16MB artifact, measured by bits-per
 
 To set up a new experiment, work with the user to:
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar18`). The branch `autoresearch/<tag>` must not already exist.
-2. **Create the branch**: `git checkout -b autoresearch/<tag>` from current main.
-3. **Read the in-scope files**: The repo is small. Read these files for full context:
+1. **Start on main**: Always begin from the `main` branch. `main` tracks the current best approach and is the single source of truth for results.
+2. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
    - `prepare.py` — fixed constants, data loading, tokenizer, evaluation, quantization. Do not modify.
    - `train.py` — the file you modify. Model architecture, optimizer, hyperparameters, training loop.
-4. **Verify data exists**: Check that `./data/datasets/fineweb10B_sp1024/` contains data shards and `./data/tokenizers/` contains the tokenizer. If not, tell the human to run `python prepare.py`.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-6. **Confirm and go**: Confirm setup looks good.
+3. **Verify data exists**: Check that `./data/datasets/fineweb10B_sp1024/` contains data shards and `./data/tokenizers/` contains the tokenizer. If not, tell the human to run `python prepare.py`.
+4. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
 
@@ -106,26 +104,26 @@ d4e5f6g	0	0.000000	0.000000	0	crash	double model width (too slow)
 
 ## The experiment loop
 
-The experiment runs on a dedicated branch (e.g. `autoresearch/mar18`).
+Work on `main` by default. You may create an experiment branch (e.g. `autoresearch/<tag>`) only if you are testing something radically different and want to isolate it. Even then, **results must always be recorded on main** (see "Pushing to GitHub" below).
 
 LOOP FOREVER:
 
-1. Look at the git state: the current branch/commit we're on
+1. Make sure you are on `main` (or your experiment branch if applicable).
 2. Tune `train.py` with an experimental idea by directly hacking the code.
 3. git commit
 4. Run the experiment: `python train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:\|^val_bpb_ci95:\|^val_bpb_quant_ci:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up on that idea.
-7. Record the results in `results.tsv`
-8. If val_bpb_quant improved (lower) AND artifact_check is PASS, you "advance" the branch, keeping the git commit
-9. If val_bpb_quant is equal or worse, or artifact is too large, you git reset back to where you started
-10. **After every experiment** (keep or discard), update and push to GitHub (see "Pushing to GitHub" below)
+7. Record the results in `results.tsv` on **main** (see "Pushing to GitHub" below)
+8. If val_bpb_quant improved (lower) AND artifact_check is PASS, keep the changes on main
+9. If val_bpb_quant is equal or worse, or artifact is too large, revert `train.py` back to the previous best version on main
+10. **After every experiment** (keep or discard), update and push main to GitHub (see "Pushing to GitHub" below)
 
-The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck, you can rewind but do this sparingly.
+The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. `main` always reflects the current best `train.py` plus the full history of all experiments in `results.tsv`. If you feel like you're getting stuck, you can try more radical ideas but do this sparingly.
 
 ## Pushing to GitHub
 
-After EVERY experiment (whether kept, discarded, or crashed), you must update the remote so progress is visible on GitHub:
+After EVERY experiment (whether kept, discarded, or crashed), you must update **main** so progress is visible on GitHub. If you are on an experiment branch, switch to main first, merge or cherry-pick your changes, then do the following:
 
 1. **Update `results.tsv`** — **APPEND** the new row (this file is tracked in git). **NEVER delete or overwrite existing rows in results.tsv. This is the permanent record of all experiments. Only add new rows at the end.**
 2. **Regenerate the progress graph**: `python plot_progress.py` — this reads `results.tsv` and writes `progress.png`.
@@ -134,7 +132,7 @@ After EVERY experiment (whether kept, discarded, or crashed), you must update th
    - The **Changelog** section lists only kept experiments in reverse chronological order, with the best marked. Format: `- **#N** \`commit\` — description → **val_bpb_quant**`
    - Update the **"Current best"** line below the table.
 4. **Commit the updates**: `git add results.tsv progress.png README.md && git commit -m "Update results: <short description>"`
-5. **Push to GitHub**: `git push --force origin HEAD`
+5. **Push to GitHub**: `git push origin main`
 
 This ensures anyone watching the repo on GitHub can see a live, growing record of all experiments with a visual progress graph.
 
