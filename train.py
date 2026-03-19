@@ -54,9 +54,9 @@ class Hyperparameters:
     # Training loop
     iterations: int = int(os.environ.get("ITERATIONS", 20_000))
     val_loss_every: int = int(os.environ.get("VAL_LOSS_EVERY", 0))
-    val_batch_size: int = int(os.environ.get("VAL_BATCH_SIZE", 524_288))
+    val_batch_size: int = int(os.environ.get("VAL_BATCH_SIZE", 8_192))
     train_log_every: int = int(os.environ.get("TRAIN_LOG_EVERY", 200))
-    train_batch_tokens: int = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
+    train_batch_tokens: int = int(os.environ.get("TRAIN_BATCH_TOKENS", 8_192))
     grad_accum_steps: int = int(os.environ.get("GRAD_ACCUM_STEPS", 8))
     train_seq_len: int = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     mlx_max_microbatch_tokens: int = int(os.environ.get("MLX_MAX_MICROBATCH_TOKENS", 8_192))
