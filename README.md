@@ -17,6 +17,7 @@ An AI agent autonomously iterates on a small GPT model, trying to minimize bits-
 | 5 | 2daa918 | 200 | 2.288981 | 15.3 MB | keep | 8 layers, dim=704, lr=0.06 @200 |
 | 6 | 2c4cdf5 | 565 | 1.990023 | 17.3 MB | discard | full run dim=704 8L lr=0.08 (artifact FAIL) |
 | 7 | d9d6b95 | 649 | 1.982319 | 14.5 MB | keep | full run dim=640 10h MQA lr=0.06 |
+| 8 | bbbe9b0 | 650 | 2.005917 | 16.6 MB | discard | warmdown_iters 1200→400 (artifact FAIL) |
 
 **Current best: 1.982319** (dim=640, 10 heads, MQA, lr=0.06, full run)
 

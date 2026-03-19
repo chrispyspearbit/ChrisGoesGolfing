@@ -60,7 +60,7 @@ class Hyperparameters:
     train_seq_len: int = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
     mlx_max_microbatch_tokens: int = int(os.environ.get("MLX_MAX_MICROBATCH_TOKENS", 8_192))
     warmup_steps: int = int(os.environ.get("WARMUP_STEPS", 20))
-    warmdown_iters: int = int(os.environ.get("WARMDOWN_ITERS", 400))
+    warmdown_iters: int = int(os.environ.get("WARMDOWN_ITERS", 1200))
     max_wallclock_seconds: float = float(os.environ.get("MAX_WALLCLOCK_SECONDS", TIME_BUDGET))
 
     # Model architecture
