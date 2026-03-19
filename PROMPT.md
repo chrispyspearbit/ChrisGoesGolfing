@@ -34,7 +34,7 @@ For faster iteration during exploration, you can reduce the time budget:
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants.
 - Install new packages or add dependencies.
-- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric.
+- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric. (Note: `train.py` uses `evaluate_bpb_strided`, a fast strided eval with 95% CI early-exit that wraps the same loss function. This is fine — it produces statistically equivalent results much faster.)
 
 **The goal is twofold:**
 1. **Lowest val_bpb** — the primary metric. Lower is better.
@@ -53,7 +53,9 @@ Once the script finishes it prints a summary like this:
 ```
 ---
 val_bpb:          1.234567
+val_bpb_ci95:     ±0.003210
 val_bpb_quant:    1.245678
+val_bpb_quant_ci: ±0.003150
 artifact_bytes:   15800000
 artifact_check:   PASS (15800000/16000000)
 model_bytes:      15750000
@@ -69,10 +71,10 @@ model_dim:        512
 Key metrics to extract:
 
 ```
-grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:" run.log
+grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:\|^val_bpb_ci95:\|^val_bpb_quant_ci:" run.log
 ```
 
-**val_bpb** is the pre-quantization score. **val_bpb_quant** is the post-quantization roundtrip score (this is the official Parameter Golf metric). **artifact_bytes** must be ≤ 16,000,000.
+**val_bpb** is the pre-quantization score. **val_bpb_quant** is the post-quantization roundtrip score (this is the official Parameter Golf metric). **artifact_bytes** must be ≤ 16,000,000. The **ci95** lines show the 95% confidence interval half-width on each BPB estimate (strided eval with early-exit — speeds up eval ~8x).
 
 ## Logging results
 
@@ -112,7 +114,7 @@ LOOP FOREVER:
 2. Tune `train.py` with an experimental idea by directly hacking the code.
 3. git commit
 4. Run the experiment: `python train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:" run.log`
+5. Read out the results: `grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:\|^val_bpb_ci95:\|^val_bpb_quant_ci:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up on that idea.
 7. Record the results in `results.tsv`
 8. If val_bpb_quant improved (lower) AND artifact_check is PASS, you "advance" the branch, keeping the git commit
@@ -136,7 +138,7 @@ After EVERY experiment (whether kept, discarded, or crashed), you must update th
 
 This ensures anyone watching the repo on GitHub can see a live, growing record of all experiments with a visual progress graph.
 
-**Timeout**: Each experiment should take ~5 minutes total (+ a few minutes for startup, warmup, and eval overhead). If a run exceeds 15 minutes, kill it and treat it as a failure.
+**Timeout**: Each experiment should take ~5 minutes total (+ a couple minutes for startup, warmup, and eval — eval uses strided sampling with CI early-exit so it's fast). If a run exceeds 12 minutes, kill it and treat it as a failure.
 
 **Crashes**: If a run crashes (OOM, or a bug), use your judgment: If it's something dumb and easy to fix (e.g. a typo), fix and re-run. If the idea itself is broken, just log "crash" and move on.
 
