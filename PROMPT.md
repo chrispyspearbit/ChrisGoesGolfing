@@ -130,7 +130,7 @@ After EVERY experiment (whether kept, discarded, or crashed), you must update th
 1. **Update `results.tsv`** — **APPEND** the new row (this file is tracked in git). **NEVER delete or overwrite existing rows in results.tsv. This is the permanent record of all experiments. Only add new rows at the end.**
 2. **Regenerate the progress graph**: `python plot_progress.py` — this reads `results.tsv` and writes `progress.png`.
 3. **Update `README.md`** — update the Results table and Changelog section:
-   - The **Results table** is a markdown table with columns: #, Commit, val_bpb_quant, Artifact, Status, Description. Add a row for the new experiment. Show artifact size in MB (e.g. "15.3 MB").
+   - The **Results table** is a markdown table with columns: #, Commit, Iterations, val_bpb_quant, Artifact, Status, Description. Add a row for the new experiment. Show artifact size in MB (e.g. "15.3 MB").
    - The **Changelog** section lists only kept experiments in reverse chronological order, with the best marked. Format: `- **#N** \`commit\` — description → **val_bpb_quant**`
    - Update the **"Current best"** line below the table.
 4. **Commit the updates**: `git add results.tsv progress.png README.md && git commit -m "Update results: <short description>"`

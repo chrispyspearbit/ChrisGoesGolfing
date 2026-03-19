@@ -8,14 +8,14 @@ An AI agent autonomously iterates on a small GPT model, trying to minimize bits-
 
 ## Results
 
-| # | Commit | val_bpb_quant | Artifact | Status | Description |
-|---|--------|---------------|----------|--------|-------------|
-| 1 | 9326e13 | 2.326520 | 10.1 MB | keep | baseline @200 |
-| 2 | 973c47e | 2.317869 | 13.8 MB | keep | dim=640, 10 heads, 5 kv_heads @200 |
-| 3 | 63ee03b | 2.316331 | 15.1 MB | keep | dim=704, 11 heads, 1 kv_head (MQA) @200 |
-| 4 | 57f53b3 | 2.279354 | 16.5 MB | discard | matrix_lr=0.06 (artifact FAIL) @200 |
-| 5 | 2daa918 | 2.288981 | 15.3 MB | keep | 8 layers, dim=704, lr=0.06 @200 |
-| 6 | 2c4cdf5 | 1.990023 | 17.3 MB | discard | full run dim=704 8L lr=0.08 (artifact FAIL) |
+| # | Commit | Iterations | val_bpb_quant | Artifact | Status | Description |
+|---|--------|------------|---------------|----------|--------|-------------|
+| 1 | 9326e13 | 200 | 2.326520 | 10.1 MB | keep | baseline @200 |
+| 2 | 973c47e | 200 | 2.317869 | 13.8 MB | keep | dim=640, 10 heads, 5 kv_heads @200 |
+| 3 | 63ee03b | 200 | 2.316331 | 15.1 MB | keep | dim=704, 11 heads, 1 kv_head (MQA) @200 |
+| 4 | 57f53b3 | 200 | 2.279354 | 16.5 MB | discard | matrix_lr=0.06 (artifact FAIL) @200 |
+| 5 | 2daa918 | 200 | 2.288981 | 15.3 MB | keep | 8 layers, dim=704, lr=0.06 @200 |
+| 6 | 2c4cdf5 | 565 | 1.990023 | 17.3 MB | discard | full run dim=704 8L lr=0.08 (artifact FAIL) |
 
 **Current best: 2.288981** (8 layers, dim=704, lr=0.06 @200)
 
