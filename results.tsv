@@ -8,3 +8,4 @@ commit	iterations	val_bpb	val_bpb_quant	artifact_bytes	status	description
 d9d6b95	649	1.984151	1.982319	14524534	keep	full run dim=640 10h MQA lr=0.06
 bbbe9b0	650	2.010909	2.005917	16562854	discard	warmdown_iters 1200→400 (artifact FAIL 16.6MB)
 4305cc7	555	2.003964	1.999741	15549982	discard	9 layers dim=640 MQA (slower, fewer steps)
+3ac1e8d	603	1.977603	1.974206	14521952	keep	SwiGLU activation replacing ReLU-squared

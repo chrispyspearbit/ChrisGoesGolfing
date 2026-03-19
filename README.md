@@ -19,12 +19,14 @@ An AI agent autonomously iterates on a small GPT model, trying to minimize bits-
 | 7 | d9d6b95 | 649 | 1.982319 | 14.5 MB | keep | full run dim=640 10h MQA lr=0.06 |
 | 8 | bbbe9b0 | 650 | 2.005917 | 16.6 MB | discard | warmdown_iters 1200→400 (artifact FAIL) |
 | 9 | 4305cc7 | 555 | 1.999741 | 15.5 MB | discard | 9 layers dim=640 MQA (slower, fewer steps) |
+| 10 | 3ac1e8d | 603 | 1.974206 | 14.5 MB | keep | SwiGLU activation replacing ReLU-squared |
 
-**Current best: 1.982319** (dim=640, 10 heads, MQA, lr=0.06, full run)
+**Current best: 1.974206** (dim=640, 10 heads, MQA, SwiGLU, lr=0.06, full run)
 
 ## Changelog
 
-- **#7** `d9d6b95` — full run dim=640 10h MQA lr=0.06 → **1.982319** (best)
+- **#10** `3ac1e8d` — SwiGLU activation replacing ReLU-squared → **1.974206** (best)
+- **#7** `d9d6b95` — full run dim=640 10h MQA lr=0.06 → **1.982319**
 - **#5** `2daa918` — 8 layers, dim=704, lr=0.06 @200 → **2.288981**
 - **#3** `63ee03b` — dim=704, 11 heads, 1 kv_head (MQA) @200 → **2.316331**
 - **#2** `973c47e` — dim=640, 10 heads, 5 kv_heads @200 → **2.317869**
