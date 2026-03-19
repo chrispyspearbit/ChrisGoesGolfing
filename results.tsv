@@ -7,3 +7,4 @@ commit	iterations	val_bpb	val_bpb_quant	artifact_bytes	status	description
 2c4cdf5	565	1.989562	1.990023	17303238	discard	full run dim=704 8L lr=0.08 (artifact FAIL 17.3MB)
 d9d6b95	649	1.984151	1.982319	14524534	keep	full run dim=640 10h MQA lr=0.06
 bbbe9b0	650	2.010909	2.005917	16562854	discard	warmdown_iters 1200→400 (artifact FAIL 16.6MB)
+4305cc7	555	2.003964	1.999741	15549982	discard	9 layers dim=640 MQA (slower, fewer steps)
