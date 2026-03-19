@@ -127,7 +127,7 @@ The idea is that you are a completely autonomous researcher trying things out. I
 
 After EVERY experiment (whether kept, discarded, or crashed), you must update the remote so progress is visible on GitHub:
 
-1. **Update `results.tsv`** — append the new row (this file is tracked in git).
+1. **Update `results.tsv`** — **APPEND** the new row (this file is tracked in git). **NEVER delete or overwrite existing rows in results.tsv. This is the permanent record of all experiments. Only add new rows at the end.**
 2. **Regenerate the progress graph**: `python plot_progress.py` — this reads `results.tsv` and writes `progress.png`.
 3. **Update `README.md`** — update the Results table and Changelog section:
    - The **Results table** is a markdown table with columns: #, Commit, val_bpb_quant, Artifact, Status, Description. Add a row for the new experiment. Show artifact size in MB (e.g. "15.3 MB").

@@ -1,2 +1,7 @@
 commit	iterations	val_bpb	val_bpb_quant	artifact_bytes	status	description
+9326e13	200	2.325641	2.326520	10129604	keep	baseline @200
+973c47e	200	2.315614	2.317869	13846125	keep	dim=640, 10 heads, 5 kv_heads @200
+63ee03b	200	2.314567	2.316331	15063562	keep	dim=704, 11 heads, 1 kv_head (MQA) @200
+57f53b3	200	2.278825	2.279354	16521064	discard	matrix_lr=0.06 (artifact FAIL) @200
+2daa918	200	2.287935	2.288981	15336781	keep	8 layers, dim=704, lr=0.06 @200
 2c4cdf5	565	1.989562	1.990023	17303238	discard	full run dim=704 8L lr=0.08 (artifact FAIL 17.3MB)
