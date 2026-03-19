@@ -221,13 +221,15 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, dim, mlp_mult):
         super().__init__()
-        hidden = dim * mlp_mult
-        self.fc = CastedLinear(dim, hidden)
+        # SwiGLU: 3 projections but smaller hidden to match param count
+        # 3*dim*hidden ≈ 2*dim*(dim*mlp_mult) → hidden ≈ dim*mlp_mult*2//3
+        hidden = (dim * mlp_mult * 2 // 3 + 15) // 16 * 16  # round to multiple of 16
+        self.gate = CastedLinear(dim, hidden)
+        self.up = CastedLinear(dim, hidden)
         self.proj = CastedLinear(hidden, dim)
 
     def __call__(self, x):
-        x = nn.relu(self.fc(x))
-        return self.proj(x * x)
+        return self.proj(nn.silu(self.gate(x)) * self.up(x))
 
 
 class Block(nn.Module):
