@@ -90,6 +90,9 @@ class Hyperparameters:
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
     muon_weight_decay: float = float(os.environ.get("MUON_WEIGHT_DECAY", 0.0))
 
+    # EMA: exponential moving average of weights for eval
+    ema_decay: float = float(os.environ.get("EMA_DECAY", 0.0))  # 0 = disabled, e.g. 0.999
+
     # Strided eval: 95% CI early-exit
     eval_ci_threshold: float = float(os.environ.get("EVAL_CI_THRESHOLD", 0.005))
     eval_min_batches: int = int(os.environ.get("EVAL_MIN_BATCHES", 30))
@@ -760,6 +763,12 @@ def main():
 
         train_loader = TokenLoader(args.train_files, log_fn=log, dataset_name=dataset_name)
 
+    # EMA tracking
+    ema_state = None
+    if args.ema_decay > 0:
+        ema_state = {k: mx.array(v) for k, v in tree_flatten(model.state)}
+        log(f"EMA enabled: decay={args.ema_decay}")
+
     # Training loop
     train_time_ms = 0.0
     max_wallclock_ms = 1000.0 * args.max_wallclock_seconds if args.max_wallclock_seconds > 0 else None
@@ -803,6 +812,10 @@ def main():
         grads = clip_grad_tree(grads, args.grad_clip_norm)
         train_loss_value = float(train_loss.item())
         opt.step(model, grads, step=step, lr_mul=lr_mul)
+        if ema_state is not None:
+            decay = args.ema_decay
+            for k, v in tree_flatten(model.state):
+                ema_state[k] = decay * ema_state[k] + (1.0 - decay) * v
         mx.synchronize()
 
         step_ms = 1000.0 * (time.perf_counter() - step_t0)
@@ -818,6 +831,11 @@ def main():
     # Final serialization + quantized roundtrip eval
     t_end = time.perf_counter()
     total_seconds = train_time_ms / 1000.0
+
+    # Swap in EMA weights for eval if enabled
+    if ema_state is not None:
+        log("using EMA weights for final eval")
+        model.update(tree_unflatten(list(ema_state.items())))
 
     # Set eval temperature (applied to logits before loss computation)
     model.eval_temperature = args.eval_temperature

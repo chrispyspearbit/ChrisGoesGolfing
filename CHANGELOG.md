@@ -270,6 +270,45 @@ Proceed to **Step 5: EMA / Stochastic Weight Averaging (SWA)**.
 
 ---
 
+## Entry #7 — EXPERIMENT — 2026-03-21
+
+**Agent:** EXPERIMENT
+**Branch:** main
+**Current Step:** 5 of 15 — EMA / Stochastic Weight Averaging
+**Step Status:** COMPLETE
+**Best val_bpb_quant so far:** 1.9686 (sliding window, Step 1)
+**Current train.py state:** 8L/640dim/SwiGLU + sliding window + EMA param (at 0.0)
+
+**Hypothesis:** EMA of weights during training produces smoother weights that generalize and compress better.
+
+### Changes Made
+- Added `ema_decay` hyperparameter (default 0.0 = disabled)
+- EMA state tracks exponential moving average of all model parameters
+- EMA weights swapped in before final eval
+
+### Results (smoke test, ~122 steps)
+
+| EMA Decay | val_bpb | val_bpb_quant |
+|---|---|---|
+| 0.0 (disabled) | 3.003 | 3.002 |
+| 0.999 | 3.619 | 3.647 |
+| 0.9999 | 4.102 | 4.121 |
+
+### Analysis
+- EMA dramatically HURTS at all decay values
+- Root cause: with only 122 steps, EMA averages early (untrained, random) weights with late (trained) weights, destroying quality
+- Higher decay (0.9999) is even worse because it weights early weights more
+- EMA requires thousands of steps to converge properly (effective window = 1/(1-decay) steps)
+- SWA would have the same problem with so few training steps
+
+### Decision
+**Step 5: [X] COMPLETE + DISCARDED.** EMA/SWA are fundamentally incompatible with short local training runs. Code kept but disabled. Critical for H100 submission with 13K+ steps.
+
+### Next Steps
+Proceed to **Step 6: SmearGate (Bigram Shortcut)**.
+
+---
+
 ## Entry #4 — RESEARCH — 2026-03-21
 
 **Agent:** RESEARCH
