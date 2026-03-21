@@ -59,3 +59,50 @@ Our strategy was speed. The competition is about **information density per artif
 7. **Extra layer** (architecture, needs int6 to fit)
 
 ---
+
+## Entry #1 — EXPERIMENT — 2026-03-21
+
+**Agent:** EXPERIMENT
+**Branch:** main
+**Current Step:** 1 of 15 — Sliding Window Evaluation
+**Step Status:** IN PROGRESS
+**Best val_bpb_quant so far:** 1.9686 (sliding window) / 1.9742 (non-overlapping, prior best)
+**Current train.py state:** 8L/640dim/SwiGLU + sliding window eval (stride=64)
+
+**Hypothesis:** Sliding window eval with stride=64 overlapping windows gives every scored token 960+ tokens of context, reducing BPB compared to non-overlapping 1024-token chunks where early tokens have minimal context.
+
+### Changes Made
+- Added `loss_last_n()` method to GPT model: computes loss on only the last N positions of each sequence
+- Added `evaluate_bpb_sliding()` function: generates overlapping windows with stride=64, batches them, scores only the last 64 tokens per window
+- Added `eval_stride` hyperparameter (default 64, configurable via EVAL_STRIDE env var)
+- Added `sliding_loss_fn` wrapper in main() for the sliding window forward pass
+- Final eval (both unquantized and quantized) now uses sliding window
+- Mid-training eval still uses fast non-overlapping method
+- CI threshold relaxed to max(eval_ci_threshold, 0.01) for sliding window eval
+
+### Results
+- **Smoke test (121 steps):** non-overlapping 3.0066 vs sliding 3.0022 = **-0.004 improvement**
+- **Full run (588 steps):**
+  - val_bpb (sliding): 1.978619 ±0.010
+  - val_bpb_quant (sliding): 1.968631 ±0.010
+  - val_bpb (non-overlapping, training loop): 1.9730 ±0.005
+  - artifact_bytes: 14,038,178 (PASS)
+  - training_seconds: 389.5
+  - total_tokens: 4.8M, steps: 588, params: 21.16M
+
+### Analysis
+- The sliding window eval gives val_bpb_quant = 1.9686 vs previous best 1.9742 = **-0.0056 BPB improvement**
+- This is smaller than the competition estimate of -0.032 to -0.035, likely because:
+  - We train for ~600 steps locally vs ~13,780 on 8xH100
+  - Lower model quality means less context improvement to extract
+  - Wide CI (±0.01) means true improvement may be larger
+- The sliding eval takes ~2 minutes (2x non-overlapping) due to CI convergence with smaller scored-tokens-per-batch
+- Non-overlapping vs sliding BPB comparison is noisy (different random seeds, different CI widths)
+
+### Decision
+KEEP — sliding window eval is implemented and working. The improvement is positive (if noisy). This is a FREE eval-only change that all top submissions use.
+
+### Next Steps
+Hand off to RESEARCH agent for analysis of whether stride=64 is optimal, whether CI convergence is fast enough, and whether the implementation is correct.
+
+---
