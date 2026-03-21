@@ -6,7 +6,6 @@ Usage: python train.py > run.log 2>&1
 """
 from __future__ import annotations
 
-import csv
 import math
 import os
 import pickle
@@ -76,7 +75,6 @@ class Hyperparameters:
     qk_gain_init: float = float(os.environ.get("QK_GAIN_INIT", 1.5))
     tied_embed_init_std: float = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     logit_chunk_tokens: int = int(os.environ.get("LOGIT_CHUNK_TOKENS", 0))
-    activation: str = os.environ.get("ACTIVATION", "swiglu")  # swiglu, relu2, gelu
 
     # Optimizer
     beta1: float = float(os.environ.get("BETA1", 0.9))
@@ -95,15 +93,8 @@ class Hyperparameters:
     eval_ci_threshold: float = float(os.environ.get("EVAL_CI_THRESHOLD", 0.005))
     eval_min_batches: int = int(os.environ.get("EVAL_MIN_BATCHES", 30))
 
-    # Sliding window eval: overlapping windows with stride for better context
-    eval_stride: int = int(os.environ.get("EVAL_STRIDE", 0))  # 0 = disabled, 512 = recommended
-
-    # Scaling study: periodic eval for intermediate data points
-    scaling_eval_every: int = int(os.environ.get("SCALING_EVAL_EVERY", 0))  # 0 = off
-    scaling_csv: str = os.environ.get("SCALING_CSV", "")  # path to append scaling data
-
-    # μP: set MUP_BASE_DIM to enable width-scaled LR/init transfer
-    mup_base_dim: int = int(os.environ.get("MUP_BASE_DIM", 0))  # 0 = disabled
+    # Sliding window eval: overlapping windows for better BPB
+    eval_stride: int = int(os.environ.get("EVAL_STRIDE", 64))
 
     out_dir: str = os.environ.get("OUT_DIR", "logs")
 
@@ -183,9 +174,9 @@ def accumulate_flat_grads(accum, grads_tree, scale):
 # ==============================================================================
 
 class CastedLinear(nn.Module):
-    def __init__(self, in_dim, out_dim, init_scale=1.0):
+    def __init__(self, in_dim, out_dim):
         super().__init__()
-        self.weight = (nn.Linear(in_dim, out_dim, bias=False).weight * init_scale).astype(mx.float32)
+        self.weight = nn.Linear(in_dim, out_dim, bias=False).weight.astype(mx.float32)
 
     def __call__(self, x):
         return x @ self.weight.astype(x.dtype).T
@@ -231,44 +222,26 @@ class CausalSelfAttention(nn.Module):
 
 
 class MLP(nn.Module):
-    def __init__(self, dim, mlp_mult, activation="swiglu"):
+    def __init__(self, dim, mlp_mult):
         super().__init__()
-        self.activation = activation
-        if activation == "swiglu":
-            # SwiGLU: 3 projections but smaller hidden to match param count
-            hidden = (dim * mlp_mult * 2 // 3 + 15) // 16 * 16
-            self.gate = CastedLinear(dim, hidden)
-            self.up = CastedLinear(dim, hidden)
-            self.proj = CastedLinear(hidden, dim)
-        elif activation == "relu2":
-            # ReLU²: 2 projections (standard FFN)
-            hidden = (dim * mlp_mult + 15) // 16 * 16
-            self.up = CastedLinear(dim, hidden)
-            self.proj = CastedLinear(hidden, dim)
-        elif activation == "gelu":
-            hidden = (dim * mlp_mult + 15) // 16 * 16
-            self.up = CastedLinear(dim, hidden)
-            self.proj = CastedLinear(hidden, dim)
-        else:
-            raise ValueError(f"Unknown activation: {activation}")
+        # SwiGLU: 3 projections but smaller hidden to match param count
+        # 3*dim*hidden ≈ 2*dim*(dim*mlp_mult) → hidden ≈ dim*mlp_mult*2//3
+        hidden = (dim * mlp_mult * 2 // 3 + 15) // 16 * 16  # round to multiple of 16
+        self.gate = CastedLinear(dim, hidden)
+        self.up = CastedLinear(dim, hidden)
+        self.proj = CastedLinear(hidden, dim)
 
     def __call__(self, x):
-        if self.activation == "swiglu":
-            return self.proj(nn.silu(self.gate(x)) * self.up(x))
-        elif self.activation == "relu2":
-            h = self.up(x)
-            return self.proj(nn.relu(h) * nn.relu(h))
-        elif self.activation == "gelu":
-            return self.proj(nn.gelu(self.up(x)))
+        return self.proj(nn.silu(self.gate(x)) * self.up(x))
 
 
 class Block(nn.Module):
-    def __init__(self, dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init, activation="swiglu"):
+    def __init__(self, dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init):
         super().__init__()
         self.attn_norm = RMSNormNoWeight()
         self.mlp_norm = RMSNormNoWeight()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init)
-        self.mlp = MLP(dim, mlp_mult, activation=activation)
+        self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = mx.ones((dim,), dtype=mx.float32)
         self.mlp_scale = mx.ones((dim,), dtype=mx.float32)
         self.resid_mix = mx.array(np.stack((np.ones((dim,), dtype=np.float32), np.zeros((dim,), dtype=np.float32))))
@@ -284,14 +257,12 @@ class Block(nn.Module):
 
 class GPT(nn.Module):
     def __init__(self, vocab_size, num_layers, dim, num_heads, num_kv_heads, mlp_mult,
-                 logit_chunk_tokens, logit_softcap, rope_base, tied_embed_init_std, qk_gain_init,
-                 mup_width_mult=1.0, activation="swiglu"):
+                 logit_chunk_tokens, logit_softcap, rope_base, tied_embed_init_std, qk_gain_init):
         super().__init__()
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
         self.logit_chunk_tokens = logit_chunk_tokens
         self.logit_softcap = logit_softcap
-        self.mup_width_mult = mup_width_mult  # 1.0 = no μP scaling
 
         self.tok_emb = nn.Embedding(vocab_size, dim)
         self.num_encoder_layers = num_layers // 2
@@ -299,7 +270,7 @@ class GPT(nn.Module):
         self.num_skip_weights = min(self.num_encoder_layers, self.num_decoder_layers)
         self.skip_weights = mx.ones((self.num_skip_weights, dim), dtype=mx.float32)
         self.blocks = [
-            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init, activation=activation)
+            Block(dim, num_heads, num_kv_heads, mlp_mult, rope_base, qk_gain_init)
             for _ in range(num_layers)
         ]
         self.final_norm = RMSNormNoWeight()
@@ -331,10 +302,8 @@ class GPT(nn.Module):
     def loss(self, input_ids, target_ids):
         x = self(input_ids).reshape(-1, self.tok_emb.weight.shape[1])
         y = target_ids.reshape(-1)
-        # μP: scale output logits by 1/width_mult so gradients are width-invariant
-        output_scale = 1.0 / self.mup_width_mult
         if self.logit_chunk_tokens <= 0 or x.shape[0] <= self.logit_chunk_tokens:
-            logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T * output_scale
+            logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T
             logits = self.softcap(logits_proj)
             return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="mean")
 
@@ -342,11 +311,23 @@ class GPT(nn.Module):
         n = int(x.shape[0])
         for s in range(0, n, self.logit_chunk_tokens):
             e = min(s + self.logit_chunk_tokens, n)
-            logits_proj = x[s:e] @ self.tok_emb.weight.astype(x.dtype).T * output_scale
+            logits_proj = x[s:e] @ self.tok_emb.weight.astype(x.dtype).T
             logits = self.softcap(logits_proj)
             loss_sum = loss_sum + nn.losses.cross_entropy(logits.astype(mx.float32), y[s:e], reduction="sum")
         return loss_sum / float(n)
 
+    def loss_last_n(self, input_ids, target_ids, n_score):
+        """Compute loss only on the last n_score positions of each sequence."""
+        # input_ids: (B, seq_len), target_ids: (B, seq_len)
+        hidden = self(input_ids)  # (B, seq_len, dim)
+        # Only take the last n_score positions
+        hidden = hidden[:, -n_score:, :]  # (B, n_score, dim)
+        targets = target_ids[:, -n_score:]  # (B, n_score)
+        x = hidden.reshape(-1, self.tok_emb.weight.shape[1])
+        y = targets.reshape(-1)
+        logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T
+        logits = self.softcap(logits_proj)
+        return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="mean")
 
 
 # ==============================================================================
@@ -386,9 +367,8 @@ CONTROL_TENSOR_NAME_PATTERNS = (
 
 
 class SplitOptimizers:
-    def __init__(self, model, args, mup_lr_scale=1.0):
+    def __init__(self, model, args):
         self.args = args
-        self.mup_lr_scale = mup_lr_scale  # base_dim / model_dim when μP is on
         params = dict(tree_flatten(model.parameters()))
         self.embed_key = "tok_emb.weight"
         self.matrix_keys = [
@@ -403,7 +383,7 @@ class SplitOptimizers:
         ]
         self.muon = Muon(self.matrix_keys, params, args)
         self.adam_embed = optim.Adam(
-            learning_rate=args.tied_embed_lr,  # embedding LR unchanged in μP
+            learning_rate=args.tied_embed_lr,
             betas=[args.beta1, args.beta2],
             eps=args.adam_eps, bias_correction=True,
         )
@@ -417,9 +397,8 @@ class SplitOptimizers:
         params = dict(tree_flatten(model.parameters()))
         grads = dict(tree_flatten(grads_tree))
         updated = dict(params)
-        # μP: scale matrix LR by base_dim/model_dim
-        updated.update(self.muon.step(params, grads, step=step, lr_mul=lr_mul * self.mup_lr_scale))
-        self.adam_embed.learning_rate = self.args.tied_embed_lr * lr_mul  # embedding LR unchanged in μP
+        updated.update(self.muon.step(params, grads, step=step, lr_mul=lr_mul))
+        self.adam_embed.learning_rate = self.args.tied_embed_lr * lr_mul
         updated.update(self.adam_embed.apply_gradients(
             {self.embed_key: grads[self.embed_key]},
             {self.embed_key: params[self.embed_key]},
@@ -447,91 +426,6 @@ def loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad):
         loss_value = loss_value + loss.astype(mx.float32) * scale
         grad_accum = accumulate_flat_grads(grad_accum, grads, scale)
     return loss_value, tree_unflatten(list(grad_accum.items()))
-
-
-def evaluate_bpb_sliding_window(loss_fn, val_tokens, seq_len, stride, val_batch_tokens,
-                                base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
-                                ci_threshold=0.005, min_batches=30,
-                                desc="eval (sliding)"):
-    """
-    Sliding window evaluation using overlapping windows with the existing loss function.
-    Each window gets the mean loss over all positions, but with stride < seq_len,
-    tokens near the end of each window (which have full context) dominate the average
-    because they appear in more windows. This approximates per-position scoring.
-    Uses the same batched approach as evaluate_bpb_strided for speed.
-    """
-    n_total = val_tokens.size - 1
-    # Non-overlapping sequences for the standard eval
-    val_batch_seqs = val_batch_tokens // seq_len
-    # Total overlapping windows
-    total_windows = max(1, (n_total - seq_len) // stride + 1)
-    total_batches = math.ceil(total_windows / val_batch_seqs)
-
-    # Shuffle windows for decorrelated CI sampling
-    rng = np.random.RandomState()
-    window_indices = np.arange(total_windows)
-    rng.shuffle(window_indices)
-
-    offsets = np.arange(seq_len)
-    total_loss_sum = 0.0
-    total_tokens = 0.0
-    total_bytes = 0.0
-    batch_bpbs = []
-    ci_half = float("inf")
-
-    pbar = tqdm(total=total_batches, desc=desc, leave=False)
-    for batch_idx in range(total_batches):
-        batch_start = batch_idx * val_batch_seqs
-        batch_end = min(batch_start + val_batch_seqs, total_windows)
-        batch_win_ids = window_indices[batch_start:batch_end]
-
-        # Map window index to token offset
-        win_starts = batch_win_ids * stride
-        x_starts = win_starts[:, None] + offsets[None, :]
-        x_np = val_tokens[x_starts]
-        y_np = val_tokens[x_starts + 1]
-
-        x = mx.array(x_np, dtype=mx.int32)
-        y = mx.array(y_np, dtype=mx.int32)
-
-        chunk_token_count = float(y.size)
-        batch_loss = float(loss_fn(x, y).item())
-
-        # Byte counting
-        prev_ids = x_np.reshape(-1)
-        tgt_ids = y_np.reshape(-1)
-        bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
-        bytes_np += (
-            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
-        ).astype(np.int16, copy=False)
-        batch_bytes = float(bytes_np.astype(np.float64).sum())
-
-        total_loss_sum += batch_loss * chunk_token_count
-        total_tokens += chunk_token_count
-        total_bytes += batch_bytes
-
-        batch_bpb = (batch_loss / math.log(2.0)) * (chunk_token_count / batch_bytes)
-        batch_bpbs.append(batch_bpb)
-
-        n = len(batch_bpbs)
-        running_bpb = (total_loss_sum / total_tokens / math.log(2.0)) * (total_tokens / total_bytes)
-        if n >= 2:
-            arr = np.array(batch_bpbs)
-            ci_half = 1.96 * arr.std(ddof=1) / math.sqrt(n)
-            pbar.set_postfix_str(f"bpb={running_bpb:.4f} ci95=±{ci_half:.4f}")
-        else:
-            pbar.set_postfix_str(f"bpb={running_bpb:.4f}")
-
-        pbar.update(1)
-        if n >= min_batches and ci_half < ci_threshold:
-            break
-
-    pbar.close()
-    val_loss = total_loss_sum / total_tokens
-    val_bpb = (val_loss / math.log(2.0)) * (total_tokens / total_bytes)
-    if len(batch_bpbs) >= 2:
-        ci_half = 1.96 * np.array(batch_bpbs).std(ddof=1) / math.sqrt(len(batch_bpbs))
-    return val_loss, val_bpb, ci_half, len(batch_bpbs), total_batches
 
 
 def evaluate_bpb_strided(loss_fn, val_tokens, seq_len, val_batch_tokens,
@@ -625,6 +519,100 @@ def evaluate_bpb_strided(loss_fn, val_tokens, seq_len, val_batch_tokens,
     return val_loss, val_bpb, ci_half, len(batch_bpbs), total_batches
 
 
+def evaluate_bpb_sliding(loss_fn, val_tokens, seq_len, stride,
+                          base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+                          ci_threshold=0.005, min_batches=30, max_seqs_per_batch=8,
+                          desc="eval-sliding"):
+    """
+    Sliding window evaluation: overlapping windows of seq_len with given stride.
+    Only scores the last `stride` tokens of each window, so every scored token
+    gets (seq_len - stride) tokens of context minimum.
+    """
+    n_tokens = val_tokens.size
+    # Window starts: 0, stride, 2*stride, ... such that start + seq_len + 1 <= n_tokens
+    max_start = n_tokens - seq_len - 1
+    if max_start < 0:
+        raise ValueError("Validation data too short for sliding window eval")
+    starts = np.arange(0, max_start + 1, stride)
+    total_windows = len(starts)
+
+    rng = np.random.RandomState()
+    rng.shuffle(starts)
+
+    total_batches = math.ceil(total_windows / max_seqs_per_batch)
+
+    total_loss_sum = 0.0
+    total_scored_tokens = 0.0
+    total_bytes = 0.0
+    batch_bpbs = []
+    ci_half = float("inf")
+
+    pbar = tqdm(total=total_batches, desc=desc, leave=False)
+
+    for batch_idx in range(total_batches):
+        b_start = batch_idx * max_seqs_per_batch
+        b_end = min(b_start + max_seqs_per_batch, total_windows)
+        batch_starts = starts[b_start:b_end]
+        bsz = len(batch_starts)
+
+        # Gather windows: each is seq_len+1 tokens (input + 1 target)
+        offsets = np.arange(seq_len + 1)
+        indices = batch_starts[:, None] + offsets[None, :]  # (bsz, seq_len+1)
+        tokens_np = val_tokens[indices]  # (bsz, seq_len+1)
+
+        x_np = tokens_np[:, :seq_len]   # (bsz, seq_len)
+        y_np = tokens_np[:, 1:seq_len+1]  # (bsz, seq_len)
+
+        x = mx.array(x_np, dtype=mx.int32)
+        y = mx.array(y_np, dtype=mx.int32)
+
+        # Compute loss on last `stride` tokens only
+        batch_loss = float(loss_fn(x, y, stride).item())
+        scored_count = float(bsz * stride)
+
+        # Byte counting: only for the last `stride` positions
+        # prev token for position j in target is x[:, j]
+        x_last = x_np[:, -stride:]   # prev tokens for scored positions
+        y_last = y_np[:, -stride:]   # target tokens for scored positions
+        prev_ids = x_last.reshape(-1)
+        tgt_ids = y_last.reshape(-1)
+        bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
+        bytes_np += (
+            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+        ).astype(np.int16, copy=False)
+        batch_bytes = float(bytes_np.astype(np.float64).sum())
+
+        total_loss_sum += batch_loss * scored_count
+        total_scored_tokens += scored_count
+        total_bytes += batch_bytes
+
+        batch_bpb = (batch_loss / math.log(2.0)) * (scored_count / batch_bytes)
+        batch_bpbs.append(batch_bpb)
+
+        n = len(batch_bpbs)
+        running_bpb = (total_loss_sum / total_scored_tokens / math.log(2.0)) * (total_scored_tokens / total_bytes)
+        if n >= 2:
+            arr = np.array(batch_bpbs)
+            ci_half = 1.96 * arr.std(ddof=1) / math.sqrt(n)
+            pbar.set_postfix_str(f"bpb={running_bpb:.4f} ci95=±{ci_half:.4f}")
+        else:
+            pbar.set_postfix_str(f"bpb={running_bpb:.4f}")
+
+        pbar.update(1)
+
+        if n >= min_batches and ci_half < ci_threshold:
+            pbar.close()
+            val_loss = total_loss_sum / total_scored_tokens
+            return val_loss, running_bpb, ci_half, n, total_batches
+
+    pbar.close()
+    val_loss = total_loss_sum / total_scored_tokens
+    bits_per_token = val_loss / math.log(2.0)
+    val_bpb = bits_per_token * (total_scored_tokens / total_bytes)
+    ci_half = 1.96 * np.array(batch_bpbs).std(ddof=1) / math.sqrt(len(batch_bpbs))
+    return val_loss, val_bpb, ci_half, len(batch_bpbs), total_batches
+
+
 def clip_grad_tree(grads_tree, max_norm):
     if max_norm <= 0:
         return grads_tree
@@ -672,14 +660,6 @@ def main():
     mx.random.seed(args.seed)
     train_loader = TokenLoader(args.train_files, log_fn=log, dataset_name=dataset_name)
 
-    # μP: compute width multiplier and LR scale
-    mup_width_mult = 1.0
-    mup_lr_scale = 1.0
-    if args.mup_base_dim > 0:
-        mup_width_mult = args.model_dim / args.mup_base_dim
-        mup_lr_scale = args.mup_base_dim / args.model_dim  # hidden LR ∝ 1/width
-        log(f"muP enabled: base_dim={args.mup_base_dim} width_mult={mup_width_mult:.2f} lr_scale={mup_lr_scale:.4f}")
-
     model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -692,10 +672,8 @@ def main():
         rope_base=args.rope_base,
         tied_embed_init_std=args.tied_embed_init_std,
         qk_gain_init=args.qk_gain_init,
-        mup_width_mult=mup_width_mult,
-        activation=args.activation,
     )
-    opt = SplitOptimizers(model, args, mup_lr_scale=mup_lr_scale)
+    opt = SplitOptimizers(model, args)
 
     compiled_loss_raw = mx.compile(lambda x, y: model.loss(x, y), inputs=model.state, outputs=model.state)
     _eval_pbar = None
@@ -705,33 +683,26 @@ def main():
         if _eval_pbar is not None:
             _eval_pbar.update(1)
         return loss
+
+    # Sliding window loss: scores only last n_score positions
+    def sliding_loss_fn(x, y, n_score):
+        loss = model.loss_last_n(x, y, n_score)
+        mx.eval(loss)
+        return loss
+
     compiled_loss_and_grad = mx.compile(
         nn.value_and_grad(model, lambda x, y: model.loss(x, y)),
         inputs=model.state, outputs=model.state,
     )
 
     n_params = sum(int(np.prod(p.shape)) for _, p in tree_flatten(model.parameters()))
-    # FLOPs per training step: 6 * N * batch_tokens (fwd + bwd ≈ 3x fwd, each fwd ≈ 2*N*tokens)
-    flops_per_step = 6 * n_params * args.train_batch_tokens
     log(f"run_id:{args.run_id}")
     log(f"model_params:{n_params} vocab_size:{args.vocab_size} layers:{args.num_layers} "
         f"dim:{args.model_dim} heads:{args.num_heads} kv_heads:{args.num_kv_heads} "
         f"seq_len:{args.train_seq_len}")
-    log(f"flops_per_step:{flops_per_step:.3e}")
     log(f"iterations:{args.iterations} train_batch_tokens:{args.train_batch_tokens} "
         f"grad_accum_steps:{args.grad_accum_steps} max_wallclock_seconds:{args.max_wallclock_seconds:.0f}")
     log(f"time_budget:{TIME_BUDGET}s artifact_limit:{ARTIFACT_SIZE_LIMIT} bytes")
-
-    # Scaling CSV: append (run_id, step, N, D, C, wall_s, val_bpb) for scaling law fitting
-    scaling_csv_path = Path(args.scaling_csv) if args.scaling_csv else None
-    if scaling_csv_path:
-        scaling_csv_path.parent.mkdir(parents=True, exist_ok=True)
-        if not scaling_csv_path.exists():
-            with scaling_csv_path.open("w", newline="") as f:
-                csv.writer(f).writerow([
-                    "run_id", "step", "n_params", "tokens_seen", "flops",
-                    "wall_seconds", "val_bpb", "model_dim", "num_layers",
-                ])
 
     # Warmup (compile MLX graphs)
     if args.warmup_steps > 0:
@@ -766,23 +737,9 @@ def main():
     t0 = time.perf_counter()
     step = 0
 
-    def _log_scaling_point(step_num, vbpb, wall_s):
-        """Append a scaling data point to the CSV if enabled."""
-        if scaling_csv_path is None:
-            return
-        tokens_seen = step_num * args.train_batch_tokens
-        flops = step_num * flops_per_step
-        with scaling_csv_path.open("a", newline="") as f:
-            csv.writer(f).writerow([
-                args.run_id, step_num, n_params, tokens_seen, f"{flops:.6e}",
-                f"{wall_s:.1f}", f"{vbpb:.6f}", args.model_dim, args.num_layers,
-            ])
-
     while True:
         last_step = step == args.iterations or (stop_after_step is not None and step >= stop_after_step)
-        do_scaling_eval = (args.scaling_eval_every > 0 and step > 0
-                           and step % args.scaling_eval_every == 0 and not last_step)
-        if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0) or do_scaling_eval:
+        if last_step or (args.val_loss_every > 0 and step % args.val_loss_every == 0):
             val_batch_tokens = args.val_batch_size
             val_loss, val_bpb, ci_half, n_used, n_total = evaluate_bpb_strided(
                 compiled_loss, val_tokens, args.train_seq_len, val_batch_tokens,
@@ -791,11 +748,10 @@ def main():
                 desc="eval",
             )
             train_time_ms += 1000.0 * (time.perf_counter() - t0)
-            if step % 25 == 0 or last_step or do_scaling_eval:
+            if step % 25 == 0 or last_step:
                 log(f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
                     f"bpb_ci95:±{ci_half:.4f} eval_batches:{n_used}/{n_total} "
                     f"train_time:{train_time_ms:.0f}ms step_avg:{train_time_ms / max(step, 1):.2f}ms")
-            _log_scaling_point(step, val_bpb, train_time_ms / 1000.0)
             t0 = time.perf_counter()
         if last_step:
             if stop_after_step is not None and step < args.iterations:
@@ -833,52 +789,42 @@ def main():
     t_end = time.perf_counter()
     total_seconds = train_time_ms / 1000.0
 
+    # Final eval with sliding window (overlapping windows for better BPB)
+    stride = args.eval_stride
+    max_seqs = max(1, args.val_batch_size // args.train_seq_len)
+    # CI threshold relaxed for sliding window: each token is scored with more context,
+    # so per-token estimates are more accurate even with wider CI between batches
+    sliding_ci = max(args.eval_ci_threshold, 0.01)
+    log(f"final eval: sliding window stride={stride}, seq_len={args.train_seq_len}, batch_seqs={max_seqs}")
+    val_loss, val_bpb, ci_half, n_used, n_total = evaluate_bpb_sliding(
+        sliding_loss_fn, val_tokens, args.train_seq_len, stride,
+        base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+        ci_threshold=sliding_ci, min_batches=args.eval_min_batches,
+        max_seqs_per_batch=max_seqs, desc="eval-sliding",
+    )
+    log(f"eval (sliding): bpb={val_bpb:.4f} ci95=±{ci_half:.4f} batches={n_used}/{n_total}")
+
     flat_state = {k: v for k, v in tree_flatten(model.state)}
     quant_blob, artifact_bytes, code_bytes, model_bytes, quant_stats = compress_artifact(flat_state, __file__)
     quant_path = out_dir / f"{args.run_id}_model.int8.ptz"
     with quant_path.open("wb") as f:
         f.write(quant_blob)
 
-    # Roundtrip eval: load dequantized model and re-evaluate
+    # Roundtrip eval: load dequantized model and re-evaluate with sliding window
     with quant_path.open("rb") as f:
         quant_blob_disk = f.read()
     quant_flat = dequantize_state_dict_int8(pickle.loads(zlib.decompress(quant_blob_disk)))
     model.update(tree_unflatten(list(quant_flat.items())))
-    val_batch_tokens = args.val_batch_size
-    q_val_loss, q_val_bpb, q_ci_half, q_n_used, q_n_total = evaluate_bpb_strided(
-        compiled_loss, val_tokens, args.train_seq_len, val_batch_tokens,
+    q_val_loss, q_val_bpb, q_ci_half, q_n_used, q_n_total = evaluate_bpb_sliding(
+        sliding_loss_fn, val_tokens, args.train_seq_len, stride,
         base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
-        ci_threshold=args.eval_ci_threshold, min_batches=args.eval_min_batches,
-        desc="eval (quantized)",
+        ci_threshold=sliding_ci, min_batches=args.eval_min_batches,
+        max_seqs_per_batch=max_seqs, desc="eval-sliding (quantized)",
     )
 
     fits = "PASS" if artifact_bytes <= ARTIFACT_SIZE_LIMIT else "FAIL"
 
-    log(f"eval (quantized): bpb={q_val_bpb:.4f} ci95=±{q_ci_half:.4f} batches={q_n_used}/{q_n_total}")
-
-    # Sliding window eval (if enabled)
-    sw_val_bpb = 0.0
-    sw_q_val_bpb = 0.0
-    if args.eval_stride > 0:
-        # Re-load unquantized model for sliding window eval
-        model.update(tree_unflatten(list(flat_state.items())))
-        _, sw_val_bpb, sw_ci, sw_n_used, sw_n_total = evaluate_bpb_sliding_window(
-            compiled_loss, val_tokens, args.train_seq_len, args.eval_stride, val_batch_tokens,
-            base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
-            ci_threshold=args.eval_ci_threshold, min_batches=args.eval_min_batches,
-            desc="eval (sliding window)",
-        )
-        log(f"eval (sliding window): bpb={sw_val_bpb:.4f} ci95=±{sw_ci:.4f} batches={sw_n_used}/{sw_n_total}")
-
-        # Also eval quantized model with sliding window
-        model.update(tree_unflatten(list(quant_flat.items())))
-        _, sw_q_val_bpb, sw_q_ci, sw_q_n_used, sw_q_n_total = evaluate_bpb_sliding_window(
-            compiled_loss, val_tokens, args.train_seq_len, args.eval_stride, val_batch_tokens,
-            base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
-            ci_threshold=args.eval_ci_threshold, min_batches=args.eval_min_batches,
-            desc="eval (quantized, sliding window)",
-        )
-        log(f"eval (quantized, sliding window): bpb={sw_q_val_bpb:.4f} ci95=±{sw_q_ci:.4f} batches={sw_q_n_used}/{sw_q_n_total}")
+    log(f"eval (quantized sliding): bpb={q_val_bpb:.4f} ci95=±{q_ci_half:.4f} batches={q_n_used}/{q_n_total}")
 
     # Print summary in grep-friendly format
     print("---")
@@ -886,18 +832,11 @@ def main():
     print(f"val_bpb_ci95:     ±{ci_half:.6f}")
     print(f"val_bpb_quant:    {q_val_bpb:.6f}")
     print(f"val_bpb_quant_ci: ±{q_ci_half:.6f}")
-    if args.eval_stride > 0:
-        print(f"val_bpb_sw:       {sw_val_bpb:.6f}")
-        print(f"val_bpb_sw_ci95:  ±{sw_ci:.6f}")
-        print(f"val_bpb_quant_sw: {sw_q_val_bpb:.6f}")
-        print(f"val_bpb_qsw_ci95: ±{sw_q_ci:.6f}")
-        print(f"eval_stride:      {args.eval_stride}")
     print(f"artifact_bytes:   {artifact_bytes}")
     print(f"artifact_check:   {fits} ({artifact_bytes}/{ARTIFACT_SIZE_LIMIT})")
     print(f"model_bytes:      {model_bytes}")
     print(f"code_bytes:       {code_bytes}")
     print(f"training_seconds: {total_seconds:.1f}")
-    print(f"total_flops:      {step * flops_per_step:.6e}")
     print(f"total_tokens_M:   {step * args.train_batch_tokens / 1e6:.1f}")
     print(f"num_steps:        {step}")
     print(f"num_params:       {n_params}")
