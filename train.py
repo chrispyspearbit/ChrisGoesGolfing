@@ -99,6 +99,10 @@ class Hyperparameters:
     # Eval temperature: scale logits by 1/T before loss. T=1.0 is no-op.
     eval_temperature: float = float(os.environ.get("EVAL_TEMPERATURE", 1.0))
 
+    # NTK-RoPE eval: use longer seq_len at eval with scaled RoPE base.
+    # 0 = disabled, positive value = eval seq_len (e.g., 1408)
+    eval_seq_len: int = int(os.environ.get("EVAL_SEQ_LEN", 0))
+
     out_dir: str = os.environ.get("OUT_DIR", "logs")
 
     @property
@@ -302,6 +306,22 @@ class GPT(nn.Module):
                 x = x + self.skip_weights[i].astype(x.dtype)[None, None, :] * skips.pop()
             x = self.blocks[self.num_encoder_layers + i](x, x0)
         return self.final_norm(x)
+
+    def set_eval_rope(self, eval_seq_len, train_seq_len, rope_base):
+        """NTK-aware RoPE scaling for eval at longer seq_len."""
+        if eval_seq_len <= train_seq_len:
+            return
+        scale = eval_seq_len / train_seq_len
+        head_dim = self.blocks[0].attn.head_dim
+        new_base = rope_base * (scale ** (head_dim / (head_dim - 2)))
+        for block in self.blocks:
+            block.attn.rope = nn.RoPE(head_dim, traditional=False, base=new_base)
+
+    def reset_rope(self, rope_base):
+        """Reset RoPE to training base frequency."""
+        head_dim = self.blocks[0].attn.head_dim
+        for block in self.blocks:
+            block.attn.rope = nn.RoPE(head_dim, traditional=False, base=rope_base)
 
     def _compute_logits(self, hidden):
         """Compute logits from hidden states, with softcap and optional temperature."""
@@ -800,15 +820,21 @@ def main():
     if args.eval_temperature != 1.0:
         log(f"eval temperature: {args.eval_temperature}")
 
+    # NTK-RoPE eval: use longer seq_len with scaled RoPE base
+    eval_seq = args.eval_seq_len if args.eval_seq_len > 0 else args.train_seq_len
+    if args.eval_seq_len > 0:
+        model.set_eval_rope(args.eval_seq_len, args.train_seq_len, args.rope_base)
+        log(f"NTK-RoPE eval: eval_seq_len={args.eval_seq_len}, train_seq_len={args.train_seq_len}")
+
     # Final eval with sliding window (overlapping windows for better BPB)
     stride = args.eval_stride
-    max_seqs = max(1, args.val_batch_size // args.train_seq_len)
+    max_seqs = max(1, args.val_batch_size // eval_seq)
     # CI threshold relaxed for sliding window: each token is scored with more context,
     # so per-token estimates are more accurate even with wider CI between batches
     sliding_ci = max(args.eval_ci_threshold, 0.01)
-    log(f"final eval: sliding window stride={stride}, seq_len={args.train_seq_len}, batch_seqs={max_seqs}")
+    log(f"final eval: sliding window stride={stride}, seq_len={eval_seq}, batch_seqs={max_seqs}")
     val_loss, val_bpb, ci_half, n_used, n_total = evaluate_bpb_sliding(
-        sliding_loss_fn, val_tokens, args.train_seq_len, stride,
+        sliding_loss_fn, val_tokens, eval_seq, stride,
         base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
         ci_threshold=sliding_ci, min_batches=args.eval_min_batches,
         max_seqs_per_batch=max_seqs, desc="eval-sliding",
@@ -826,8 +852,11 @@ def main():
         quant_blob_disk = f.read()
     quant_flat = dequantize_state_dict_int8(pickle.loads(zlib.decompress(quant_blob_disk)))
     model.update(tree_unflatten(list(quant_flat.items())))
+    # Re-apply NTK-RoPE scaling after loading quantized weights (RoPE isn't in state dict)
+    if args.eval_seq_len > 0:
+        model.set_eval_rope(args.eval_seq_len, args.train_seq_len, args.rope_base)
     q_val_loss, q_val_bpb, q_ci_half, q_n_used, q_n_total = evaluate_bpb_sliding(
-        sliding_loss_fn, val_tokens, args.train_seq_len, stride,
+        sliding_loss_fn, val_tokens, eval_seq, stride,
         base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
         ci_threshold=sliding_ci, min_batches=args.eval_min_batches,
         max_seqs_per_batch=max_seqs, desc="eval-sliding (quantized)",

@@ -193,6 +193,45 @@ Proceed to **Step 3: NTK-RoPE Eval Extrapolation**.
 
 ---
 
+## Entry #5 — EXPERIMENT — 2026-03-21
+
+**Agent:** EXPERIMENT
+**Branch:** main
+**Current Step:** 3 of 15 — NTK-RoPE Eval Extrapolation
+**Step Status:** COMPLETE
+**Best val_bpb_quant so far:** 1.9686 (sliding window, Step 1)
+**Current train.py state:** 8L/640dim/SwiGLU + sliding window eval + temperature param + NTK-RoPE param
+
+**Hypothesis:** NTK-aware RoPE scaling at eval time (eval_seq_len=1408 with scaled rope_base) gives more context per token, improving BPB.
+
+### Changes Made
+- Added `eval_seq_len` hyperparameter (default 0=disabled, via EVAL_SEQ_LEN env var)
+- Added `set_eval_rope()` and `reset_rope()` methods to GPT model
+- NTK-aware scaling: `new_base = base * (scale ** (head_dim / (head_dim - 2)))`
+- RoPE scaling reapplied after quantized weight loading
+
+### Results (smoke test, ~122 steps)
+
+| Config | val_bpb | val_bpb_quant |
+|---|---|---|
+| Baseline (sliding, seq=1024) | 3.0004 | 3.0066 |
+| NTK-RoPE (sliding, seq=1408) | 2.9938 | 3.0203 |
+
+### Analysis
+- Unquantized BPB improved by -0.007 (matches expectation)
+- Quantized BPB worsened by +0.014
+- Both differences are within noise (CI ±0.01)
+- The expected gain (-0.007) is smaller than our CI, making this untestable locally
+- NTK-RoPE may help more on H100 with better-trained models
+
+### Decision
+**Step 3: [X] COMPLETE + DISCARDED.** Inconclusive on local Mac. The code is kept (param defaults to disabled) but not used. May revisit on H100.
+
+### Next Steps
+Proceed to **Step 4: Muon Weight Decay** — a training change with estimated -0.003 to -0.005 BPB.
+
+---
+
 ## Entry #4 — RESEARCH — 2026-03-21
 
 **Agent:** RESEARCH
