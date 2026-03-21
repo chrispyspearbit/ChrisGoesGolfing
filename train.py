@@ -96,6 +96,9 @@ class Hyperparameters:
     # Sliding window eval: overlapping windows for better BPB
     eval_stride: int = int(os.environ.get("EVAL_STRIDE", 64))
 
+    # Eval temperature: scale logits by 1/T before loss. T=1.0 is no-op.
+    eval_temperature: float = float(os.environ.get("EVAL_TEMPERATURE", 1.0))
+
     out_dir: str = os.environ.get("OUT_DIR", "logs")
 
     @property
@@ -263,6 +266,7 @@ class GPT(nn.Module):
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
         self.logit_chunk_tokens = logit_chunk_tokens
         self.logit_softcap = logit_softcap
+        self.eval_temperature = 1.0  # set > 1.0 or < 1.0 at eval time only
 
         self.tok_emb = nn.Embedding(vocab_size, dim)
         self.num_encoder_layers = num_layers // 2
@@ -299,34 +303,36 @@ class GPT(nn.Module):
             x = self.blocks[self.num_encoder_layers + i](x, x0)
         return self.final_norm(x)
 
+    def _compute_logits(self, hidden):
+        """Compute logits from hidden states, with softcap and optional temperature."""
+        logits_proj = hidden @ self.tok_emb.weight.astype(hidden.dtype).T
+        logits = self.softcap(logits_proj)
+        if self.eval_temperature != 1.0:
+            logits = logits / self.eval_temperature
+        return logits
+
     def loss(self, input_ids, target_ids):
         x = self(input_ids).reshape(-1, self.tok_emb.weight.shape[1])
         y = target_ids.reshape(-1)
         if self.logit_chunk_tokens <= 0 or x.shape[0] <= self.logit_chunk_tokens:
-            logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T
-            logits = self.softcap(logits_proj)
+            logits = self._compute_logits(x)
             return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="mean")
 
         loss_sum = mx.array(0.0, dtype=mx.float32)
         n = int(x.shape[0])
         for s in range(0, n, self.logit_chunk_tokens):
             e = min(s + self.logit_chunk_tokens, n)
-            logits_proj = x[s:e] @ self.tok_emb.weight.astype(x.dtype).T
-            logits = self.softcap(logits_proj)
+            logits = self._compute_logits(x[s:e])
             loss_sum = loss_sum + nn.losses.cross_entropy(logits.astype(mx.float32), y[s:e], reduction="sum")
         return loss_sum / float(n)
 
     def loss_last_n(self, input_ids, target_ids, n_score):
         """Compute loss only on the last n_score positions of each sequence."""
-        # input_ids: (B, seq_len), target_ids: (B, seq_len)
-        hidden = self(input_ids)  # (B, seq_len, dim)
-        # Only take the last n_score positions
-        hidden = hidden[:, -n_score:, :]  # (B, n_score, dim)
-        targets = target_ids[:, -n_score:]  # (B, n_score)
+        hidden = self(input_ids)[:, -n_score:, :]
+        targets = target_ids[:, -n_score:]
         x = hidden.reshape(-1, self.tok_emb.weight.shape[1])
         y = targets.reshape(-1)
-        logits_proj = x @ self.tok_emb.weight.astype(x.dtype).T
-        logits = self.softcap(logits_proj)
+        logits = self._compute_logits(x)
         return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="mean")
 
 
@@ -788,6 +794,11 @@ def main():
     # Final serialization + quantized roundtrip eval
     t_end = time.perf_counter()
     total_seconds = train_time_ms / 1000.0
+
+    # Set eval temperature (applied to logits before loss computation)
+    model.eval_temperature = args.eval_temperature
+    if args.eval_temperature != 1.0:
+        log(f"eval temperature: {args.eval_temperature}")
 
     # Final eval with sliding window (overlapping windows for better BPB)
     stride = args.eval_stride
