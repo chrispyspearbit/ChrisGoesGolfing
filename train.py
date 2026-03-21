@@ -96,7 +96,7 @@ class Hyperparameters:
     eval_min_batches: int = int(os.environ.get("EVAL_MIN_BATCHES", 30))
 
     # Sliding window eval: overlapping windows with stride for better context
-    eval_stride: int = int(os.environ.get("EVAL_STRIDE", 64))  # 0 = disabled (use non-overlapping)
+    eval_stride: int = int(os.environ.get("EVAL_STRIDE", 0))  # 0 = disabled, 512 = recommended
 
     # Scaling study: periodic eval for intermediate data points
     scaling_eval_every: int = int(os.environ.get("SCALING_EVAL_EVERY", 0))  # 0 = off
@@ -348,6 +348,7 @@ class GPT(nn.Module):
         return loss_sum / float(n)
 
 
+
 # ==============================================================================
 # OPTIMIZERS
 # ==============================================================================
@@ -448,81 +449,89 @@ def loss_and_grad_chunked(args, train_loader, compiled_loss_and_grad):
     return loss_value, tree_unflatten(list(grad_accum.items()))
 
 
-def _compute_per_position_loss(model, input_ids, target_ids):
-    """Compute per-position cross-entropy loss (unreduced). Returns shape [batch*seq_len]."""
-    x = model(input_ids).reshape(-1, model.tok_emb.weight.shape[1])
-    y = target_ids.reshape(-1)
-    output_scale = 1.0 / model.mup_width_mult
-    logits_proj = x @ model.tok_emb.weight.astype(x.dtype).T * output_scale
-    logits = model.softcap(logits_proj)
-    return nn.losses.cross_entropy(logits.astype(mx.float32), y, reduction="none")
-
-
-def evaluate_bpb_sliding_window(model, val_tokens, seq_len, stride,
+def evaluate_bpb_sliding_window(loss_fn, val_tokens, seq_len, stride, val_batch_tokens,
                                 base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
-                                batch_size=8, desc="eval (sliding)"):
+                                ci_threshold=0.005, min_batches=30,
+                                desc="eval (sliding)"):
     """
-    Sliding window evaluation: overlapping windows with small stride.
-    Each scored token gets (seq_len - stride) context tokens.
-    Much more accurate than non-overlapping eval.
+    Sliding window evaluation using overlapping windows with the existing loss function.
+    Each window gets the mean loss over all positions, but with stride < seq_len,
+    tokens near the end of each window (which have full context) dominate the average
+    because they appear in more windows. This approximates per-position scoring.
+    Uses the same batched approach as evaluate_bpb_strided for speed.
     """
-    n_tokens = val_tokens.size - 1  # last token is only used as target
-    # Generate window start positions
-    starts = list(range(0, n_tokens - seq_len + 1, stride))
-    if not starts:
-        starts = [0]
-    if starts[-1] + seq_len < n_tokens:
-        starts.append(n_tokens - seq_len)
+    n_total = val_tokens.size - 1
+    # Non-overlapping sequences for the standard eval
+    val_batch_seqs = val_batch_tokens // seq_len
+    # Total overlapping windows
+    total_windows = max(1, (n_total - seq_len) // stride + 1)
+    total_batches = math.ceil(total_windows / val_batch_seqs)
 
+    # Shuffle windows for decorrelated CI sampling
+    rng = np.random.RandomState()
+    window_indices = np.arange(total_windows)
+    rng.shuffle(window_indices)
+
+    offsets = np.arange(seq_len)
     total_loss_sum = 0.0
-    total_tokens_scored = 0
+    total_tokens = 0.0
     total_bytes = 0.0
-    n_batches = math.ceil(len(starts) / batch_size)
+    batch_bpbs = []
+    ci_half = float("inf")
 
-    pbar = tqdm(total=n_batches, desc=desc, leave=False)
-    for b in range(n_batches):
-        batch_starts = starts[b * batch_size : (b + 1) * batch_size]
-        bsz = len(batch_starts)
+    pbar = tqdm(total=total_batches, desc=desc, leave=False)
+    for batch_idx in range(total_batches):
+        batch_start = batch_idx * val_batch_seqs
+        batch_end = min(batch_start + val_batch_seqs, total_windows)
+        batch_win_ids = window_indices[batch_start:batch_end]
 
-        # Gather windows: [bsz, seq_len]
-        offsets = np.arange(seq_len)
-        x_np = np.stack([val_tokens[s + offsets] for s in batch_starts])
-        y_np = np.stack([val_tokens[s + 1 + offsets] for s in batch_starts])
+        # Map window index to token offset
+        win_starts = batch_win_ids * stride
+        x_starts = win_starts[:, None] + offsets[None, :]
+        x_np = val_tokens[x_starts]
+        y_np = val_tokens[x_starts + 1]
 
         x = mx.array(x_np, dtype=mx.int32)
         y = mx.array(y_np, dtype=mx.int32)
 
-        per_pos_loss = _compute_per_position_loss(model, x, y)
-        mx.eval(per_pos_loss)
-        per_pos_loss_np = np.array(per_pos_loss, dtype=np.float64).reshape(bsz, seq_len)
+        chunk_token_count = float(y.size)
+        batch_loss = float(loss_fn(x, y).item())
 
-        for j in range(bsz):
-            global_idx = b * batch_size + j
-            # First window: score all positions; rest: only last stride positions
-            score_start = 0 if global_idx == 0 else (seq_len - stride)
-            scored_losses = per_pos_loss_np[j, score_start:]
-            scored_x = x_np[j, score_start:]
-            scored_y = y_np[j, score_start:]
+        # Byte counting
+        prev_ids = x_np.reshape(-1)
+        tgt_ids = y_np.reshape(-1)
+        bytes_np = base_bytes_lut[tgt_ids].astype(np.int16, copy=True)
+        bytes_np += (
+            has_leading_space_lut[tgt_ids] & ~is_boundary_token_lut[prev_ids]
+        ).astype(np.int16, copy=False)
+        batch_bytes = float(bytes_np.astype(np.float64).sum())
 
-            # Byte counting
-            bytes_arr = base_bytes_lut[scored_y].astype(np.int16, copy=True)
-            bytes_arr += (
-                has_leading_space_lut[scored_y] & ~is_boundary_token_lut[scored_x]
-            ).astype(np.int16, copy=False)
+        total_loss_sum += batch_loss * chunk_token_count
+        total_tokens += chunk_token_count
+        total_bytes += batch_bytes
 
-            total_loss_sum += float(scored_losses.sum())
-            total_tokens_scored += len(scored_losses)
-            total_bytes += float(bytes_arr.astype(np.float64).sum())
+        batch_bpb = (batch_loss / math.log(2.0)) * (chunk_token_count / batch_bytes)
+        batch_bpbs.append(batch_bpb)
 
-        if (b + 1) % 10 == 0 or b == n_batches - 1:
-            running_bpb = (total_loss_sum / total_tokens_scored / math.log(2.0)) * (total_tokens_scored / total_bytes)
+        n = len(batch_bpbs)
+        running_bpb = (total_loss_sum / total_tokens / math.log(2.0)) * (total_tokens / total_bytes)
+        if n >= 2:
+            arr = np.array(batch_bpbs)
+            ci_half = 1.96 * arr.std(ddof=1) / math.sqrt(n)
+            pbar.set_postfix_str(f"bpb={running_bpb:.4f} ci95=±{ci_half:.4f}")
+        else:
             pbar.set_postfix_str(f"bpb={running_bpb:.4f}")
+
         pbar.update(1)
+        if n >= min_batches and ci_half < ci_threshold:
+            break
 
     pbar.close()
-    val_loss = total_loss_sum / total_tokens_scored
-    val_bpb = (val_loss / math.log(2.0)) * (total_tokens_scored / total_bytes)
-    return val_loss, val_bpb, total_tokens_scored
+    val_loss = total_loss_sum / total_tokens
+    val_bpb = (val_loss / math.log(2.0)) * (total_tokens / total_bytes)
+    if len(batch_bpbs) >= 2:
+        ci_half = 1.96 * np.array(batch_bpbs).std(ddof=1) / math.sqrt(len(batch_bpbs))
+    return val_loss, val_bpb, ci_half, len(batch_bpbs), total_batches
 
 
 def evaluate_bpb_strided(loss_fn, val_tokens, seq_len, val_batch_tokens,
@@ -853,21 +862,23 @@ def main():
     if args.eval_stride > 0:
         # Re-load unquantized model for sliding window eval
         model.update(tree_unflatten(list(flat_state.items())))
-        _, sw_val_bpb, sw_n_scored = evaluate_bpb_sliding_window(
-            model, val_tokens, args.train_seq_len, args.eval_stride,
+        _, sw_val_bpb, sw_ci, sw_n_used, sw_n_total = evaluate_bpb_sliding_window(
+            compiled_loss, val_tokens, args.train_seq_len, args.eval_stride, val_batch_tokens,
             base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+            ci_threshold=args.eval_ci_threshold, min_batches=args.eval_min_batches,
             desc="eval (sliding window)",
         )
-        log(f"eval (sliding window): bpb={sw_val_bpb:.4f} tokens_scored={sw_n_scored}")
+        log(f"eval (sliding window): bpb={sw_val_bpb:.4f} ci95=±{sw_ci:.4f} batches={sw_n_used}/{sw_n_total}")
 
         # Also eval quantized model with sliding window
         model.update(tree_unflatten(list(quant_flat.items())))
-        _, sw_q_val_bpb, sw_q_n_scored = evaluate_bpb_sliding_window(
-            model, val_tokens, args.train_seq_len, args.eval_stride,
+        _, sw_q_val_bpb, sw_q_ci, sw_q_n_used, sw_q_n_total = evaluate_bpb_sliding_window(
+            compiled_loss, val_tokens, args.train_seq_len, args.eval_stride, val_batch_tokens,
             base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+            ci_threshold=args.eval_ci_threshold, min_batches=args.eval_min_batches,
             desc="eval (quantized, sliding window)",
         )
-        log(f"eval (quantized, sliding window): bpb={sw_q_val_bpb:.4f} tokens_scored={sw_q_n_scored}")
+        log(f"eval (quantized, sliding window): bpb={sw_q_val_bpb:.4f} ci95=±{sw_q_ci:.4f} batches={sw_q_n_used}/{sw_q_n_total}")
 
     # Print summary in grep-friendly format
     print("---")
@@ -877,7 +888,9 @@ def main():
     print(f"val_bpb_quant_ci: ±{q_ci_half:.6f}")
     if args.eval_stride > 0:
         print(f"val_bpb_sw:       {sw_val_bpb:.6f}")
+        print(f"val_bpb_sw_ci95:  ±{sw_ci:.6f}")
         print(f"val_bpb_quant_sw: {sw_q_val_bpb:.6f}")
+        print(f"val_bpb_qsw_ci95: ±{sw_q_ci:.6f}")
         print(f"eval_stride:      {args.eval_stride}")
     print(f"artifact_bytes:   {artifact_bytes}")
     print(f"artifact_check:   {fits} ({artifact_bytes}/{ARTIFACT_SIZE_LIMIT})")
