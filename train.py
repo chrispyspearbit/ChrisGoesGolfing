@@ -88,6 +88,7 @@ class Hyperparameters:
     muon_momentum_warmup_start: float = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
     muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
+    muon_weight_decay: float = float(os.environ.get("MUON_WEIGHT_DECAY", 0.0))
 
     # Strided eval: 95% CI early-exit
     eval_ci_threshold: float = float(os.environ.get("EVAL_CI_THRESHOLD", 0.005))
@@ -382,7 +383,10 @@ class Muon:
             g_eff = g + momentum * buf
             g_ortho = zeropower_newtonschulz5(g_eff, self.args.muon_backend_steps)
             scale = math.sqrt(max(1.0, float(p.shape[0]) / float(p.shape[1])))
-            out[k] = p - lr * (g_ortho * scale).astype(p.dtype)
+            update = lr * (g_ortho * scale).astype(p.dtype)
+            if self.args.muon_weight_decay > 0:
+                update = update + lr * self.args.muon_weight_decay * p
+            out[k] = p - update
         return out
 
 

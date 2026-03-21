@@ -232,6 +232,44 @@ Proceed to **Step 4: Muon Weight Decay** — a training change with estimated -0
 
 ---
 
+## Entry #6 — EXPERIMENT — 2026-03-21
+
+**Agent:** EXPERIMENT
+**Branch:** main
+**Current Step:** 4 of 15 — Muon Weight Decay
+**Step Status:** COMPLETE
+**Best val_bpb_quant so far:** 1.9686 (sliding window, Step 1)
+**Current train.py state:** 8L/640dim/SwiGLU + sliding window + WD param (at 0.0)
+
+**Hypothesis:** Weight decay (0.01-0.04) regularizes weight magnitudes → tighter distributions → less quantization error.
+
+### Changes Made
+- Added `muon_weight_decay` hyperparameter (default 0.0, via MUON_WEIGHT_DECAY env var)
+- Applied WD as decoupled weight decay in Muon step: `p = p - lr * (g_ortho + wd * p)`
+
+### Results (smoke test, ~122 steps)
+
+| Weight Decay | val_bpb | val_bpb_quant | artifact_bytes |
+|---|---|---|---|
+| **0.00** | **3.003** | **3.002** | 9.0M |
+| 0.01 | 3.040 | 3.046 | 9.0M |
+| 0.02 | 3.033 | 3.049 | 9.0M |
+| 0.04 | 3.033 | 3.047 | 8.9M |
+
+### Analysis
+- All weight decay values HURT BPB by 0.03-0.04
+- Artifact size decreases marginally (smaller weights) but quality loss dominates
+- At ~122 steps, WD has no time to provide regularization benefit
+- May help at 13K+ steps on H100, but untestable locally
+
+### Decision
+**Step 4: [X] COMPLETE + DISCARDED.** Weight decay hurts at local training scale. Code kept (defaults to 0.0). May revisit on H100 with full training.
+
+### Next Steps
+Proceed to **Step 5: EMA / Stochastic Weight Averaging (SWA)**.
+
+---
+
 ## Entry #4 — RESEARCH — 2026-03-21
 
 **Agent:** RESEARCH
