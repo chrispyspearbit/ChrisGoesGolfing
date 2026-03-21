@@ -1,154 +1,245 @@
-# ChrisGoesGolfing — Parameter Golf Autoresearch
+# ChrisGoesGolfing — Parameter Golf Autoresearch v2
 
-This is an autonomous research loop for the OpenAI Parameter Golf challenge.
+Autonomous research loop for the OpenAI Parameter Golf challenge.
 Train the best language model that fits in a 16MB artifact, measured by bits-per-byte (BPB) on FineWeb.
 
-## Setup
+## The Competition Landscape
 
-To set up a new experiment, work with the user to:
+**Current SOTA:** val_bpb = 1.1428. **Baseline:** 1.2244. Top submissions use int6/int5 QAT, 3x MLP, sliding window eval, SWA, BigramHash, SmearGate. The binding constraint is the **16MB artifact**, not wall-clock time. More params + better quantization beats faster training.
 
-1. **Start on main**: Always begin from the `main` branch. `main` tracks the current best approach and is the single source of truth for results.
-2. **Read the in-scope files**: The repo is small. Read these files for full context:
-   - `README.md` — repository context.
-   - `prepare.py` — fixed constants, data loading, tokenizer, evaluation, quantization. Do not modify.
-   - `train.py` — the file you modify. Model architecture, optimizer, hyperparameters, training loop.
-3. **Verify data exists**: Check that `./data/datasets/fineweb10B_sp1024/` contains data shards and `./data/tokenizers/` contains the tokenizer. If not, tell the human to run `python prepare.py`.
-4. **Confirm and go**: Confirm setup looks good.
+**Our best local result:** val_bpb_quant = 1.974 (8L/640dim/SwiGLU, 603 steps, 14.5MB artifact).
 
-Once you get confirmation, kick off the experimentation.
-
-## Experimentation
-
-Each experiment runs locally on Apple Silicon (MLX). The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup/compilation). You launch it simply as: `python train.py`.
-
-For faster iteration during exploration, you can reduce the time budget:
-- Quick smoke test: `MAX_WALLCLOCK_SECONDS=60 ITERATIONS=500 TRAIN_BATCH_TOKENS=8192 python train.py`
-- Medium run: `MAX_WALLCLOCK_SECONDS=180 python train.py`
-- Full experiment: `python train.py` (5 minutes, default)
-
-**What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, number of layers, attention heads, MLP width, activation functions, skip connections, etc.
-
-**What you CANNOT do:**
-- Modify `prepare.py`. It is read-only. It contains the fixed evaluation, data loading, tokenizer, and training constants.
-- Install new packages or add dependencies.
-- Modify the evaluation harness. The `evaluate_bpb` function in `prepare.py` is the ground truth metric. (Note: `train.py` uses `evaluate_bpb_strided`, a fast strided eval with 95% CI early-exit that wraps the same loss function. This is fine — it produces statistically equivalent results much faster.)
-
-**The goal is twofold:**
-1. **Lowest val_bpb** — the primary metric. Lower is better.
-2. **Artifact must fit in 16MB** — the int8+zlib compressed model + code must be ≤ 16,000,000 bytes.
-
-The artifact size is checked automatically. If `artifact_check` shows FAIL, your model is too large. You'll need to reduce parameters, adjust quantization-friendliness, or find a more compact architecture.
-
-**Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Removing something and getting equal or better results is a great outcome.
-
-**The first run**: Your very first run should always be to establish the baseline, so you will run the training script as is.
-
-## Output format
-
-Once the script finishes it prints a summary like this:
-
-```
 ---
-val_bpb:          1.234567
-val_bpb_ci95:     ±0.003210
-val_bpb_quant:    1.245678
-val_bpb_quant_ci: ±0.003150
-artifact_bytes:   15800000
-artifact_check:   PASS (15800000/16000000)
-model_bytes:      15750000
-code_bytes:       50000
-training_seconds: 300.1
-total_tokens_M:   499.6
-num_steps:        953
-num_params:       5000000
-num_layers:       9
-model_dim:        512
+
+## Agent System: Strict One-Step-at-a-Time Research Loop
+
+You operate as an autonomous research system processing **one step at a time** from the Step Queue (see "Research Directions"). This is a slow, thorough, PhD-level research process. Every step must be individually measured before moving to the next.
+
+### CRITICAL RULES
+
+1. **ONE STEP AT A TIME.** Never combine multiple steps. Never multitask. Take the next step off the queue, implement it, test it, analyze it, then move on.
+2. **Every step gets TWO phases:** first an EXPERIMENT agent implements and tests it, then a RESEARCH agent analyzes the results and decides what to do next.
+3. **Build on success.** If a step IMPROVED results, the next step builds ON TOP of the improved code. Do not revert successful changes.
+4. **Revert failures.** If a step HURT results, revert the code change but KEEP the log entry. Then move to the next step.
+5. **Completion signal.** Only after EVERY step in the queue has been attempted (implemented, tested, analyzed) may you output: **"Loop complete."** Not before. Every. Single. Step.
+
+### Phase 1: EXPERIMENT Agent (implements + tests ONE step)
+
+**Role:** Take exactly ONE step from the Step Queue. Research it, implement it, test it.
+
+**Process:**
+1. Read `CHANGELOG.md` to understand current state and ALL prior results
+2. Read `results.tsv` for quantitative history
+3. Identify the NEXT unfinished step from the Step Queue
+4. Research this specific technique (use web search if needed to understand implementation details)
+5. Implement it in `train.py` (the ONLY file you edit)
+6. git commit with descriptive message
+7. Run a smoke test first (`MAX_WALLCLOCK_SECONDS=60`), then a full run if smoke test passes
+8. Extract and record results
+9. Append EXPERIMENT entry to `CHANGELOG.md` (see format below)
+10. Update `results.tsv`, push to GitHub
+11. **STOP. Do not start the next step. Hand off to the RESEARCH agent.**
+
+### Phase 2: RESEARCH Agent (analyzes ONE step's results)
+
+**Role:** Deeply analyze the results of the step that was just tested. Decide whether it was thorough enough.
+
+**Process:**
+1. Read the EXPERIMENT entry that was just added to `CHANGELOG.md`
+2. Read ALL prior entries for context
+3. Analyze the results and write a RESEARCH entry answering:
+   - **Did the step work?** Quantify: how much did val_bpb change? Artifact size?
+   - **Was it tested thoroughly?** Did we run a full experiment or just a smoke test? Should we re-run with different hyperparameters?
+   - **Is there more to extract?** Could we get more from this technique with tuning? Should we ablate specific aspects?
+   - **Did we miss something?** Was there a detail in the implementation we got wrong?
+   - **Should we iterate on this step?** If yes, specify exactly what to try next WITHIN this same step before moving on.
+   - **Or should we move on?** If the step is thoroughly tested (positive or negative), mark it COMPLETE and move to the next step.
+4. Update the Step Queue status in `CHANGELOG.md`
+5. **STOP. Hand back to EXPERIMENT agent for either a re-test of this step OR the next step.**
+
+### The Loop
+
+```
+For each step in the Step Queue:
+    EXPERIMENT agent: implement + test the step
+    RESEARCH agent: analyze results
+    If RESEARCH says "needs more testing":
+        EXPERIMENT agent: re-test with adjustments
+        RESEARCH agent: re-analyze
+        (repeat until RESEARCH marks step COMPLETE)
+    Move to next step
+
+After ALL steps are COMPLETE:
+    Output "Loop complete."
 ```
 
-Key metrics to extract:
+### State Tracking
+
+At the top of every `CHANGELOG.md` entry, include:
 
 ```
-grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:\|^val_bpb_ci95:\|^val_bpb_quant_ci:" run.log
+**Current Step:** [N] of [total] — [step name]
+**Step Status:** IN PROGRESS / NEEDS MORE TESTING / COMPLETE
+**Best val_bpb_quant so far:** [value]
+**Current train.py state:** [description of what's active]
 ```
 
-**val_bpb** is the pre-quantization score. **val_bpb_quant** is the post-quantization roundtrip score (this is the official Parameter Golf metric). **artifact_bytes** must be ≤ 16,000,000. The **ci95** lines show the 95% confidence interval half-width on each BPB estimate (strided eval with early-exit — speeds up eval ~8x).
+This ensures any agent picking up the work knows exactly where we are.
 
-## Logging results
+---
 
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated).
+## CHANGELOG.md Format
 
-The TSV has a header row and 7 columns:
+Every entry follows this template. **Never delete entries. This is a permanent log.**
 
+```markdown
+---
+## Entry #N — [EXPERIMENT/RESEARCH] — [Date/Time]
+
+**Agent:** EXPERIMENT | RESEARCH
+**Branch:** main
+**Hypothesis:** [What we're testing and why]
+
+### Changes Made
+[For EXPERIMENT: exact code changes, file, lines]
+[For RESEARCH: "Analysis only, no code changes"]
+
+### Results
+[For EXPERIMENT: val_bpb, val_bpb_quant, artifact_bytes, artifact_check, steps, tokens]
+[For RESEARCH: N/A]
+
+### Analysis
+[What happened? Why? What does this mean for our strategy?]
+
+### Decision
+[KEEP / DISCARD / PIVOT]
+[If KEEP: what does this unlock?]
+[If DISCARD: what did we learn?]
+[If PIVOT: what's the new direction?]
+
+### Next Steps
+[Specific next experiments to try]
+---
 ```
-commit	iterations	val_bpb	val_bpb_quant	artifact_bytes	status	description
+
+---
+
+## Running Experiments
+
+**Platform:** Apple Silicon (MLX). **CRITICAL: batch size = 8192 tokens. NEVER increase. Mac will OOM.**
+
+```bash
+# Quick smoke test (~1 min):
+MAX_WALLCLOCK_SECONDS=60 ITERATIONS=500 python train.py > run.log 2>&1
+
+# Medium run (~3 min):
+MAX_WALLCLOCK_SECONDS=180 python train.py > run.log 2>&1
+
+# Full experiment (~5 min):
+python train.py > run.log 2>&1
 ```
 
-1. git commit hash (short, 7 chars)
-2. iterations run (e.g. 200, 500, 953)
-3. val_bpb achieved (pre-quant, e.g. 1.234567) — use 0.000000 for crashes
-4. val_bpb_quant achieved (post-quant roundtrip) — use 0.000000 for crashes
-5. artifact_bytes (e.g. 15800000) — use 0 for crashes
-6. status: `keep`, `discard`, or `crash`
-7. short text description of what this experiment tried
-
-Example:
-
-```
-commit	iterations	val_bpb	val_bpb_quant	artifact_bytes	status	description
-a1b2c3d	953	1.234567	1.245678	15800000	keep	baseline
-b2c3d4e	953	1.220000	1.231000	15900000	keep	increase matrix_lr to 0.06
-c3d4e5f	953	1.250000	1.261000	15800000	discard	switch to GELU activation
-d4e5f6g	0	0.000000	0.000000	0	crash	double model width (too slow)
+**Extract results:**
+```bash
+grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:\|^val_bpb_ci95:\|^val_bpb_quant_ci:\|^num_params:\|^total_tokens_M:" run.log
 ```
 
-## The experiment loop
+**Files:**
+- `train.py` — the ONLY file you edit. Architecture, optimizer, everything.
+- `prepare.py` — READ ONLY. Data loading, tokenizer, evaluation, quantization.
+- `results.tsv` — permanent experiment record (append only, tab-separated)
+- `CHANGELOG.md` — detailed research log (append only)
+- `README.md` — public-facing summary (update after each experiment)
 
-Work on `main` by default. You may create an experiment branch (e.g. `autoresearch/<tag>`) only if you are testing something radically different and want to isolate it. Even then, **results must always be recorded on main** (see "Pushing to GitHub" below).
+---
 
-LOOP FOREVER:
+## Step Queue
 
-1. Make sure you are on `main` (or your experiment branch if applicable).
-2. Tune `train.py` with an experimental idea by directly hacking the code.
-3. git commit
-4. Run the experiment: `python train.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^val_bpb:\|^val_bpb_quant:\|^artifact_bytes:\|^artifact_check:\|^val_bpb_ci95:\|^val_bpb_quant_ci:" run.log`
-6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up on that idea.
-7. Record the results in `results.tsv` on **main** (see "Pushing to GitHub" below)
-8. If val_bpb_quant improved (lower) AND artifact_check is PASS, keep the changes on main
-9. If val_bpb_quant is equal or worse, or artifact is too large, revert `train.py` back to the previous best version on main
-10. **After every experiment** (keep or discard), update and push main to GitHub (see "Pushing to GitHub" below)
+This is the ordered list of steps to execute. **Process them ONE AT A TIME.** Each step must be implemented, tested, and analyzed before moving to the next. Steps that improve results are KEPT and subsequent steps build on top. Mark each step's status as you go.
 
-The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. `main` always reflects the current best `train.py` plus the full history of all experiments in `results.tsv`. If you feel like you're getting stuck, you can try more radical ideas but do this sparingly.
+### Status Key
+- `[ ]` = Not started
+- `[~]` = In progress
+- `[✓]` = Complete (tested, analyzed, decision made)
+- `[K]` = Complete + KEPT (improvement, code kept on main)
+- `[X]` = Complete + DISCARDED (no improvement, code reverted)
+
+### The Steps
+
+**Step 1: [ ] Sliding Window Evaluation (FREE, eval-only)**
+Estimated: -0.032 to -0.035 BPB. Overlapping windows with stride=64 instead of non-overlapping 1024-token chunks. Every scored token gets 960+ context tokens. Modify the eval loop in train.py. No model or training changes needed. This is the single biggest free win — test it first to establish the "free improvement" baseline.
+
+**Step 2: [ ] Optimal Temperature Search at Eval (FREE, eval-only)**
+Estimated: -0.001 to -0.005 BPB. Grid-search temperature T in {0.90, 0.95, 1.00, 1.05, 1.10} on a subset of validation data, apply the best T to full eval. One-line change: `logits = logits / T`. Quick to test.
+
+**Step 3: [ ] NTK-RoPE Eval Extrapolation (FREE, eval-only)**
+Estimated: -0.007 BPB. Train at seq_len=1024, evaluate at seq_len=1408 with NTK-aware RoPE scaling. The model sees more context at eval time. Modify rope_base at eval time only.
+
+**Step 4: [ ] Muon Weight Decay**
+Estimated: -0.003 to -0.005 BPB. Add weight decay (0.01-0.04) to the Muon optimizer. Regularizes weight magnitudes → tighter distributions → less quantization error. Test WD=0.01, 0.02, 0.04. Small code change, big downstream impact (enables better quantization).
+
+**Step 5: [ ] EMA / Stochastic Weight Averaging (SWA)**
+Estimated: -0.003 to -0.006 BPB. Track EMA of weights during training (decay=0.999) OR save checkpoints every 50 steps during warmdown and average them. Export the averaged weights. Smoother weights → better generalization + better compression.
+
+**Step 6: [ ] SmearGate (Bigram Shortcut)**
+Estimated: -0.003 to -0.005 BPB. Learned per-dimension sigmoid gate that blends each token embedding with the previous token's: `output = x + alpha * shift(x, 1)`. ~512 params. Cheap bigram-level context before the transformer. One of the simplest architectural additions.
+
+**Step 7: [ ] 3x MLP Expansion**
+Estimated: -0.010 to -0.015 BPB. Increase MLP hidden from 2x to 3x. For SwiGLU: hidden = (dim * 3 * 2 // 3). Check artifact size — may need to reduce dim slightly to stay under 16MB, or combine with int6 quantization (Step 9).
+
+**Step 8: [ ] Extra Layer (9th layer)**
+Estimated: -0.005 to -0.010 BPB. Add a 9th layer to the current 8L model. Check artifact size. If over 16MB, may need to reduce dim or combine with int6 (Step 9).
+
+**Step 9: [ ] Int6 Quantization-Aware Training (QAT)**
+Estimated: -0.015 to -0.020 BPB. Fake-quantize weights to int6 [-32,31] during forward pass using Straight-Through Estimator (STE). The model learns weight distributions robust to int6 rounding. At export, quantize to int6 instead of int8. Saves ~2MB → room for more params. This is the biggest single training-side improvement and UNLOCKS Steps 7 and 8 (bigger models that fit in 16MB).
+
+**Step 10: [ ] BigramHash Embedding**
+Estimated: -0.005 to -0.008 BPB. Hash consecutive token pairs into N buckets (4096-10240), embed each in dim=128, project to model_dim with a small linear layer. Adds sub-word pair information that vocab=1024 misses. Tiny parameter cost (~0.5M params for 4096 buckets).
+
+**Step 11: [ ] Multi-Token Prediction (Auxiliary Objective)**
+Estimated: -0.01 to -0.02 BPB. Add 1-2 extra prediction heads that predict tokens 2-3 positions ahead. Auxiliary losses improve backbone representations. Heads are DISCARDED at export — zero artifact cost. Each head is dim×vocab = 640×1024 = ~0.65M params in training memory only.
+
+**Step 12: [ ] Layer Weight Sharing (Depth Recurrence)**
+Estimated: -0.03 to -0.06 BPB. Share weights across groups of layers: e.g., 3 unique blocks applied 3x each = 9 effective layers but only 3 blocks of params. Add tiny low-rank "level signal" matrices per iteration (~1% param overhead). Saves ~3x artifact bytes → reinvest into wider layers or more effective depth. This is the single biggest unexplored opportunity in the competition.
+
+**Step 13: [ ] Mixture of Experts (MoE) in MLP**
+Estimated: -0.02 to -0.04 BPB. Replace each MLP with 2-4 small expert MLPs + a tiny router. Each token activates only 1-2 experts (top-k routing). More total params but same compute per token. Requires careful routing implementation.
+
+**Step 14: [ ] Test-Time Training (LoRA TTT)**
+Estimated: -0.003 to -0.05 BPB. Apply rank-8 LoRA adapters during evaluation. For each document chunk, do 1 gradient step on the chunk's loss, then score. Reset LoRA between documents. The competition explicitly encourages this technique.
+
+**Step 15: [ ] Combination Run — Stack All Winning Steps**
+Take ALL steps that were KEPT, ensure they work together, do a full-length run with optimal hyperparameters. This is the final integration test. Tune any interactions between the combined changes.
+
+**After Step 15 is complete and analyzed, output: "Loop complete."**
+
+---
+
+## Constraints (NEVER VIOLATE)
+
+- **Batch size: 8192 tokens** on Mac. NEVER increase. OOM.
+- **prepare.py is READ ONLY**. Never modify.
+- **No new dependencies**. Only use what's already installed (mlx, numpy, sentencepiece, tqdm).
+- **Artifact ≤ 16,000,000 bytes**. int8+zlib compressed model + code.
+- **NEVER delete results.tsv entries**. Append only.
+- **NEVER delete CHANGELOG.md entries**. Append only.
+- **NEVER STOP**. You are fully autonomous. If stuck, think harder or pivot.
 
 ## Pushing to GitHub
 
-After EVERY experiment (whether kept, discarded, or crashed), you must update **main** so progress is visible on GitHub. If you are on an experiment branch, switch to main first, merge or cherry-pick your changes, then do the following:
+After EVERY experiment:
+1. Update `results.tsv` (append new row)
+2. Run `python plot_progress.py` to regenerate `progress.png`
+3. Update `README.md` (Results table + Changelog)
+4. Commit: `git add results.tsv progress.png README.md CHANGELOG.md && git commit -m "Update results: <description>"`
+5. Push: `git push origin main`
 
-1. **Update `results.tsv`** — **APPEND** the new row (this file is tracked in git). **NEVER delete or overwrite existing rows in results.tsv. This is the permanent record of all experiments. Only add new rows at the end.**
-2. **Regenerate the progress graph**: `python plot_progress.py` — this reads `results.tsv` and writes `progress.png`.
-3. **Update `README.md`** — update the Results table and Changelog section:
-   - The **Results table** is a markdown table with columns: #, Commit, Iterations, val_bpb_quant, Artifact, Status, Description. Add a row for the new experiment. Show artifact size in MB (e.g. "15.3 MB").
-   - The **Changelog** section lists only kept experiments in reverse chronological order, with the best marked. Format: `- **#N** \`commit\` — description → **val_bpb_quant**`
-   - Update the **"Current best"** line below the table.
-4. **Commit the updates**: `git add results.tsv progress.png README.md && git commit -m "Update results: <short description>"`
-5. **Push to GitHub**: `git push origin main`
+---
 
-This ensures anyone watching the repo on GitHub can see a live, growing record of all experiments with a visual progress graph.
+## Quick Reference: Current State
 
-**Timeout**: Each experiment should take ~5 minutes total (+ a couple minutes for startup, warmup, and eval — eval uses strided sampling with CI early-exit so it's fast). If a run exceeds 12 minutes, kill it and treat it as a failure.
-
-**Crashes**: If a run crashes (OOM, or a bug), use your judgment: If it's something dumb and easy to fix (e.g. a typo), fix and re-run. If the idea itself is broken, just log "crash" and move on.
-
-**NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?". The human might be asleep. You are autonomous. If you run out of ideas, think harder — re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
-
-## Ideas to explore
-
-Here are some directions worth investigating (not exhaustive):
-
-- **Architecture**: layer count vs width tradeoff, GQA head ratios, MLP expansion factor, different activation functions (GELU, SwiGLU), skip connection strategies
-- **Optimizer**: learning rates for each parameter group, momentum schedules, warmdown fraction, weight decay
-- **Training**: batch size, sequence length, gradient accumulation steps
-- **Quantization-aware**: choices that compress better under int8+zlib (smoother weight distributions, fewer outliers)
-- **Model size**: finding the sweet spot where more parameters improve BPB but still fit in 16MB after compression
-- **Tokenizer interaction**: the 1024 vocab is fixed but architecture choices interact with it
+**Best local result:** SwiGLU, 8L/640dim, val_bpb_quant = 1.974, artifact 14.5MB
+**Leaderboard SOTA:** 1.1428 (int5/int6 QAT + 10L + 3x MLP + SWA + BigramHash + sliding window)
+**Gap to close:** 0.83 BPB
+**Biggest free wins:** Sliding window eval (-0.035), NTK-RoPE extrapolation (-0.007)
+**Biggest training wins:** QAT + bigger model (-0.035), SWA (-0.005), weight decay (-0.005)
